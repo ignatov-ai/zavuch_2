@@ -4,10 +4,16 @@
 
 Основной способ: Selenium + webdriver-manager + CDP.
 Резервный: cookies браузера через browser_cookie3.
+
+Ключевое отличие от предыдущей версии:
+  • save_session() дублирует auth_token/profile_id в cookies session.pkl.
+  • load_session() умеет читать auth_token из cookies И из auth_data.json.
+  • При успешной авторизации сохраняется ~/.ejd_checker/auth_data.json.
 """
 import requests
 from urllib.parse import urljoin
 import pickle
+import json
 from pathlib import Path
 import time
 
@@ -26,82 +32,151 @@ class dn_Auth:
         self.aid = "13"  # ID учебного года 2025-2026
         self.curr_aid = "13"
 
+        # Хранимые отдельно токены — на случай, если их нет в cookies
+        self.auth_token = ""
+        self.profile_id = ""
+
         # Директория для сохранения сессий
         self.session_dir = Path.home() / '.ejd_checker'
         self.session_dir.mkdir(exist_ok=True)
         self.session_file = self.session_dir / 'session.pkl'
+        self.auth_data_file = self.session_dir / 'auth_data.json'
 
     # ================================================================
     #  СОХРАНЕНИЕ / ЗАГРУЗКА СЕССИИ
     # ================================================================
-    def save_session(self):
-        """Сохраняет сессию для повторного использования"""
-        if self.session:
-            try:
-                with open(self.session_file, 'wb') as f:
-                    pickle.dump(self.session.cookies, f)
-                return True
-            except Exception:
+    def _save_auth_data(self):
+        """Сохраняет auth_token, profile_id и school_id в отдельный JSON."""
+        try:
+            data = {
+                "auth_token": self.auth_token or "",
+                "profile_id": str(self.profile_id or self.pid or ""),
+                "school_id": str(self.sid or ""),
+            }
+            with open(self.auth_data_file, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            return True
+        except Exception:
+            return False
+
+    def _load_auth_data(self):
+        """Загружает auth_token/profile_id из auth_data.json."""
+        try:
+            if not self.auth_data_file.exists():
                 return False
-        return False
+            with open(self.auth_data_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            self.auth_token = data.get("auth_token") or ""
+            self.profile_id = str(data.get("profile_id") or "")
+            self.pid = self.profile_id or self.pid
+            if data.get("school_id"):
+                sid_val = data["school_id"]
+                self.sid = int(sid_val) if str(sid_val).isdigit() else sid_val
+            return bool(self.auth_token)
+        except Exception:
+            return False
+
+    def save_session(self):
+        """
+        Сохраняет сессию.
+        ВАЖНО: если auth_token/profile_id есть в self, но их нет в cookies —
+        дублируем их в cookies, чтобы load_session() их нашёл.
+        """
+        if not self.session:
+            return False
+        try:
+            cookies_dict = requests.utils.dict_from_cookiejar(self.session.cookies)
+
+            if self.auth_token and "auth_token" not in cookies_dict:
+                self.session.cookies.set("auth_token", self.auth_token, domain="dnevnik.mos.ru")
+                self.session.cookies.set("auth_token", self.auth_token, domain="school.mos.ru")
+
+            pid_val = self.profile_id or self.pid
+            if pid_val and "profile_id" not in cookies_dict:
+                self.session.cookies.set("profile_id", str(pid_val), domain="dnevnik.mos.ru")
+
+            with open(self.session_file, 'wb') as f:
+                pickle.dump(self.session.cookies, f)
+
+            self._save_auth_data()
+            return True
+        except Exception:
+            return False
 
     def load_session(self):
-        """Загружает сохраненную сессию и проверяет её через API"""
+        """Загружает сохранённую сессию и проверяет её через API."""
         try:
-            if self.session_file.exists():
-                self.session = requests.Session()
-                self.session.headers.update({
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                    'Accept': 'application/json, text/plain, */*',
-                    'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
-                })
+            if not self.session_file.exists():
+                return False
 
-                with open(self.session_file, 'rb') as f:
-                    cookies = pickle.load(f)
-                    self.session.cookies.update(cookies)
+            self.session = requests.Session()
+            self.session.headers.update({
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Accept': 'application/json, text/plain, */*',
+                'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
+            })
 
-                # Проверяем, работает ли сессия
-                response = self.session.get(
-                    urljoin(self.base, "core/api/schools"),
-                    timeout=self.timeout
-                )
+            with open(self.session_file, 'rb') as f:
+                cookies = pickle.load(f)
+                self.session.cookies.update(cookies)
 
-                if response.status_code == 200:
-                    data = response.json()
-                    if data:
-                        self.sid = data[0]["id"]
-                        cookies_dict = requests.utils.dict_from_cookiejar(self.session.cookies)
-                        self.pid = cookies_dict.get("profile_id", "")
+            cookies_dict = requests.utils.dict_from_cookiejar(self.session.cookies)
 
-                        if "auth_token" in cookies_dict:
-                            self.session.headers.update({
-                                'Auth-Token': cookies_dict["auth_token"],
-                                'Profile-Id': self.pid
-                            })
-                        return True
+            auth_token = cookies_dict.get("auth_token")
+            profile_id = cookies_dict.get("profile_id")
+
+            if not auth_token:
+                if self._load_auth_data():
+                    auth_token = self.auth_token
+                    profile_id = profile_id or self.profile_id
+
+            if not auth_token:
+                return False
+
+            self.auth_token = auth_token
+            self.profile_id = str(profile_id or "")
+            self.pid = self.profile_id
+
+            self.session.cookies.set("auth_token", auth_token, domain="dnevnik.mos.ru")
+            self.session.cookies.set("auth_token", auth_token, domain="school.mos.ru")
+            if self.profile_id:
+                self.session.cookies.set("profile_id", self.profile_id, domain="dnevnik.mos.ru")
+
+            self.session.headers.update({
+                'Auth-Token': auth_token,
+                'Authorization': f'Bearer {auth_token}',
+            })
+            if self.profile_id:
+                self.session.headers.update({'Profile-Id': self.profile_id})
+
+            response = self.session.get(
+                urljoin(self.base, "core/api/schools"),
+                timeout=self.timeout
+            )
+
+            if response.status_code == 200:
+                data = response.json()
+                if data:
+                    self.sid = data[0]["id"]
+                    return True
+            return False
+
         except Exception:
-            pass
-        return False
+            return False
 
     # ================================================================
-    #  АВТОРИЗАЦИЯ ЧЕРЕЗ SELENIUM (ОСНОВНОЙ СПОСОБ)
+    #  АВТОРИЗАЦИЯ ЧЕРЕЗ SELENIUM
     # ================================================================
     def login_with_selenium_advanced(self, username, password,
                                      totp_key=None, browser='chrome',
-                                     log_callback=None):
+                                     log_callback=None,
+                                     gui_confirm_callback=None):
         """
-        Продвинутая авторизация через Selenium с поддержкой 2FA
-        и получением cookies dnevnik.mos.ru.
+        Продвинутая авторизация через Selenium с поддержкой 2FA.
 
-        Args:
-            username: логин (телефон, email, СНИЛС)
-            password: пароль
-            totp_key: TOTP-ключ (если 2FA через приложение)
-            browser: 'chrome' или 'firefox'
-            log_callback: функция для логирования
-
-        Returns:
-            bool — успех авторизации
+        gui_confirm_callback(driver, auth_obj) — вызывается после успешного
+        получения cookies и проверки API. Внутри GUI-поток показывает попап
+        «Куки получены» и ждёт нажатия пользователя.
         """
         import tempfile
         import traceback
@@ -113,6 +188,8 @@ class dn_Auth:
                 print(msg, flush=True)
 
         driver = None
+        keep_browser_open = False
+
         try:
             log("=== Начало авторизации через Selenium ===")
             log(f"[i] Логин: {username}")
@@ -139,7 +216,6 @@ class dn_Auth:
                 from webdriver_manager.chrome import ChromeDriverManager
 
                 options = ChromeOptions()
-                # options.add_argument("--headless=new")
 
                 temp_profile_dir = tempfile.mkdtemp(prefix="selenium_chrome_")
                 options.add_argument(f"--user-data-dir={temp_profile_dir}")
@@ -194,7 +270,7 @@ class dn_Auth:
             log("[+] Страница загружена")
 
             # ============================================================
-            #  ШАГ 2: Вводим логин
+            #  ШАГ 2: Логин
             # ============================================================
             log("[i] Ввожу логин...")
             time.sleep(1.5)
@@ -206,7 +282,7 @@ class dn_Auth:
             log("[+] Логин введён")
 
             # ============================================================
-            #  ШАГ 3: Вводим пароль
+            #  ШАГ 3: Пароль
             # ============================================================
             log("[i] Ввожу пароль...")
             time.sleep(1.5)
@@ -218,7 +294,7 @@ class dn_Auth:
             log("[+] Пароль введён")
 
             # ============================================================
-            #  ШАГ 4: Нажимаем кнопку «Войти»
+            #  ШАГ 4: Кнопка «Войти»
             # ============================================================
             log("[i] Ищу кнопку 'Войти'...")
             time.sleep(1.5)
@@ -295,17 +371,16 @@ class dn_Auth:
                     break
                 time.sleep(1)
             log(f"[+] Текущий URL: {driver.current_url}")
-            time.sleep(3)  # даём приложению school.mos.ru загрузиться
+            time.sleep(3)
 
             # ============================================================
-            #  ШАГ 7: Переход на dnevnik.mos.ru
+            #  ШАГ 7: Открываем dnevnik.mos.ru
             # ============================================================
             log("[i] Перехожу на dnevnik.mos.ru для получения cookies...")
             try:
                 driver.get("https://dnevnik.mos.ru/")
 
-                # Ждём до 15 секунд, пока URL действительно станет dnevnik.mos.ru
-                end = time.time() + 15
+                end = time.time() + 20
                 dnevnik_opened = False
                 while time.time() < end:
                     current = driver.current_url
@@ -318,86 +393,116 @@ class dn_Auth:
                 if not dnevnik_opened:
                     log(f"[!] Не удалось открыть dnevnik.mos.ru. Текущий URL: {driver.current_url}")
                     log("[i] Пробую открыть напрямую /diary...")
-                    driver.get("https://dnevnik.mos.ru/diary")
-                    time.sleep(5)
+                    try:
+                        driver.get("https://dnevnik.mos.ru/diary")
+                        time.sleep(5)
+                    except Exception as e:
+                        log(f"[!] /diary тоже не открылся: {e}")
 
-                # Даём время на установку cookies
                 time.sleep(5)
                 log(f"[+] Финальный URL: {driver.current_url}")
             except Exception as e:
                 log(f"[!] Не удалось перейти: {e}")
 
             # ============================================================
-            #  ШАГ 8: Сбор cookies ВСЕХ доменов через CDP
+            #  ШАГ 8: Сбор cookies + токенов из всех источников
             # ============================================================
-            log("[i] Собираю cookies всех доменов через CDP...")
+            log("[i] Собираю cookies и токены...")
+
             all_cookies = {}
-            school_cookies = {}
-            dnevnik_cookies = {}
 
             try:
                 result = driver.execute_cdp_cmd("Network.getAllCookies", {})
                 total = len(result.get("cookies", []))
-                log(f"[i] Всего cookies (все домены): {total}")
-
+                log(f"[i] CDP getAllCookies: {total} cookies")
                 for c in result.get("cookies", []):
-                    domain = c.get("domain", "")
                     name = c.get("name", "")
                     value = c.get("value", "")
-
-                    # Логируем важные cookies
-                    if name in ("auth_token", "profile_id", "is_auth",
-                                "session-cookie", "spa_id", "aid", "aupd_token"):
-                        log(f"    [{domain}] {name} = {str(value)[:40]}...")
-
-                    if "dnevnik.mos.ru" in domain:
-                        dnevnik_cookies[name] = value
-                    if "school.mos.ru" in domain:
-                        school_cookies[name] = value
-
-                log(f"[+] Cookies dnevnik.mos.ru: {len(dnevnik_cookies)}")
-                log(f"[+] Cookies school.mos.ru: {len(school_cookies)}")
-
-                # Приоритет: сначала school.mos.ru, потом dnevnik.mos.ru
-                all_cookies.update(school_cookies)
-                all_cookies.update(dnevnik_cookies)
-
+                    if name:
+                        all_cookies[name] = value
             except Exception as e:
-                log(f"[!] CDP getAllCookies не сработал: {e}")
-                log("[i] Fallback — беру только текущий домен")
+                log(f"[!] CDP getAllCookies: {e}")
+
+            try:
                 for c in driver.get_cookies():
-                    all_cookies[c["name"]] = c["value"]
+                    if c.get("name"):
+                        all_cookies[c["name"]] = c["value"]
+            except Exception as e:
+                log(f"[!] driver.get_cookies: {e}")
+
+            token_from_storage = None
+            try:
+                token_from_storage = driver.execute_script("""
+                    return window.sessionStorage.getItem('auth_token')
+                        || window.localStorage.getItem('auth_token')
+                        || window.sessionStorage.getItem('token')
+                        || window.localStorage.getItem('token')
+                        || window.sessionStorage.getItem('access_token')
+                        || window.localStorage.getItem('access_token')
+                        || null;
+                """)
+            except Exception as e:
+                log(f"[!] localStorage/sessionStorage: {e}")
+
+            if token_from_storage:
+                log(f"[+] auth_token найден в storage: {str(token_from_storage)[:30]}...")
+                all_cookies["auth_token"] = token_from_storage
+
+            profile_id = None
+            try:
+                profile_id = driver.execute_script("""
+                    return window.sessionStorage.getItem('profile_id')
+                        || window.localStorage.getItem('profile_id')
+                        || null;
+                """)
+            except Exception:
+                pass
+
+            if not profile_id:
+                profile_id = all_cookies.get("profile_id")
+
+            log(f"[i] Итог: cookies={len(all_cookies)}, "
+                f"auth_token={'✅' if 'auth_token' in all_cookies else '❌'}, "
+                f"profile_id={profile_id or '❌'}")
 
             # ============================================================
-            #  ШАГ 9: Если auth_token не найден — повторный переход
+            #  ШАГ 9: Если токен не найден — ждём пользователя до 3 мин
             # ============================================================
             if "auth_token" not in all_cookies:
-                log("[!] auth_token не найден ни в одном домене!")
-                log("[i] Пробую ещё раз перейти на dnevnik.mos.ru/diary...")
-                try:
-                    driver.get("https://dnevnik.mos.ru/diary")
-                    time.sleep(8)
-                    log(f"[+] Текущий URL: {driver.current_url}")
+                log("[!] auth_token не найден сразу.")
+                log("[i] Жду до 3 минут: откройте дневник в браузере (dnevnik.mos.ru/diary).")
 
-                    result = driver.execute_cdp_cmd("Network.getAllCookies", {})
-                    for c in result.get("cookies", []):
-                        domain = c.get("domain", "")
-                        name = c.get("name", "")
-                        value = c.get("value", "")
-                        if "dnevnik.mos.ru" in domain:
-                            dnevnik_cookies[name] = value
-                            all_cookies[name] = value
-
-                    log(f"[+] После повторного перехода cookies dnevnik.mos.ru: {len(dnevnik_cookies)}")
-                    if "auth_token" in dnevnik_cookies:
-                        log("[+] auth_token найден!")
-                    else:
-                        log("[!] auth_token всё ещё отсутствует")
-                except Exception as e:
-                    log(f"[!] Повторный переход не удался: {e}")
+                end_wait = time.time() + 180
+                while time.time() < end_wait:
+                    try:
+                        token_from_storage = driver.execute_script("""
+                            return window.sessionStorage.getItem('auth_token')
+                                || window.localStorage.getItem('auth_token')
+                                || window.sessionStorage.getItem('token')
+                                || window.localStorage.getItem('token')
+                                || null;
+                        """)
+                        if token_from_storage:
+                            all_cookies["auth_token"] = token_from_storage
+                            log(f"[+] auth_token появился: {str(token_from_storage)[:30]}...")
+                            break
+                        for c in driver.get_cookies():
+                            if c.get("name") == "auth_token":
+                                all_cookies["auth_token"] = c["value"]
+                                log("[+] auth_token появился в cookies")
+                                break
+                        if not profile_id:
+                            profile_id = driver.execute_script("""
+                                return window.sessionStorage.getItem('profile_id')
+                                    || window.localStorage.getItem('profile_id')
+                                    || null;
+                            """)
+                    except Exception:
+                        pass
+                    time.sleep(2)
 
             # ============================================================
-            #  ШАГ 10: Создаём сессию с cookies
+            #  ШАГ 10: Создаём requests.Session
             # ============================================================
             if not all_cookies:
                 log("[!] Не удалось получить ни одной cookies")
@@ -406,28 +511,35 @@ class dn_Auth:
             log(f"[i] Создаю requests.Session с {len(all_cookies)} cookies...")
             self.session = requests.Session()
             self.session.headers.update({
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
-                              '(KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36',
-                'Accept': 'application/json, text/plain, */*',
-                'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                              "AppleWebKit/537.36 (KHTML, like Gecko) "
+                              "Chrome/152.0.0.0 Safari/537.36",
+                "Accept": "application/json, text/plain, */*",
+                "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
             })
 
-            # Ставим cookies сразу для обоих доменов
             for name, value in all_cookies.items():
                 self.session.cookies.set(name, value, domain="dnevnik.mos.ru")
                 self.session.cookies.set(name, value, domain="school.mos.ru")
 
-            cookies_dict = requests.utils.dict_from_cookiejar(self.session.cookies)
-            log(f"[i] Cookies в сессии: {list(cookies_dict.keys())}")
+            if "auth_token" in all_cookies:
+                self.auth_token = all_cookies["auth_token"]
+                self.profile_id = str(profile_id or all_cookies.get("profile_id", "") or "")
+                self.pid = self.profile_id
 
-            # Устанавливаем заголовки
-            if "auth_token" in cookies_dict:
                 self.session.headers.update({
-                    'Auth-Token': cookies_dict["auth_token"],
-                    'Profile-Id': cookies_dict.get("profile_id", ""),
+                    "Auth-Token": self.auth_token,
+                    "Authorization": f"Bearer {self.auth_token}",
                 })
-                self.pid = cookies_dict.get("profile_id", "")
-                log(f"[+] Auth-Token установлен, profile_id = {self.pid}")
+                if self.pid:
+                    self.session.headers.update({"Profile-Id": self.pid})
+
+                self.session.cookies.set("auth_token", self.auth_token, domain="dnevnik.mos.ru")
+                self.session.cookies.set("auth_token", self.auth_token, domain="school.mos.ru")
+                if self.pid:
+                    self.session.cookies.set("profile_id", self.pid, domain="dnevnik.mos.ru")
+
+                log(f"[+] Auth-Token установлен, profile_id={self.pid}")
             else:
                 log("[!] auth_token отсутствует — API вернёт 403")
 
@@ -435,6 +547,7 @@ class dn_Auth:
             #  ШАГ 11: Проверяем API
             # ============================================================
             log("[i] Проверяю авторизацию: GET core/api/schools")
+            api_ok = False
             try:
                 response = self.session.get(
                     urljoin(self.base, "core/api/schools"),
@@ -447,43 +560,56 @@ class dn_Auth:
                     if data:
                         self.sid = data[0]["id"]
                         log(f"[+] Авторизация успешна! Школа: {data[0].get('name')}")
+
                         self.save_session()
                         log(f"[+] Сессия сохранена: {self.session_file}")
-                        return True
+                        log(f"[+] Auth-данные сохранены: {self.auth_data_file}")
+                        api_ok = True
                     else:
                         log("[!] Пустой ответ API")
                 elif response.status_code == 403:
                     log("[!] 403 Forbidden — cookies не подходят для API")
-                    log("[i] Текст ответа: " + response.text[:200])
+                    log("[i] Тело ответа: " + response.text[:200])
                 else:
                     log(f"[!] Неожиданный HTTP {response.status_code}")
-                    log(f"[i] Текст: {response.text[:200]}")
+                    log(f"[i] Тело: {response.text[:200]}")
             except Exception as e:
                 log(f"[!] Ошибка запроса к API: {e}")
 
-            return False
+            # ============================================================
+            #  ШАГ 12: Передаём браузер в GUI
+            # ============================================================
+            if gui_confirm_callback is not None:
+                keep_browser_open = True
+                try:
+                    gui_confirm_callback(driver, self)
+                except Exception as e:
+                    log(f"[!] GUI callback error: {e}")
+                    keep_browser_open = False
+                    try:
+                        driver.quit()
+                    except Exception:
+                        pass
+                    driver = None
+
+            return api_ok or ("auth_token" in all_cookies)
 
         except Exception as e:
             log(f"[!] Ошибка Selenium-авторизации: {e}")
             log(traceback.format_exc())
             return False
         finally:
-            if driver is not None:
+            if driver is not None and not keep_browser_open:
                 try:
                     driver.quit()
-                    log("[i] Браузер закрыт")
+                    log("[i] Браузер закрыт (finally)")
                 except Exception:
                     pass
 
     # ================================================================
-    #  РЕЗЕРВНЫЙ СПОСОБ: АВТОРИЗАЦИЯ ЧЕРЕЗ COOKIES БРАУЗЕРА
+    #  РЕЗЕРВНЫЙ СПОСОБ: cookies из браузера
     # ================================================================
     def login_from_browser(self, browser='auto'):
-        """
-        Авторизация через куки браузера (резервный способ).
-        Работает, если пользователь уже авторизован в Firefox/Chrome/Edge
-        на dnevnik.mos.ru.
-        """
         import browser_cookie3
 
         try:
@@ -519,9 +645,6 @@ class dn_Auth:
             for browser_name, browser_func in browsers_to_try:
                 try:
                     cookies = browser_func(domain_name=self.domain)
-                    for cookie in cookies:
-                        if cookie.name == "is_auth" and cookie.value == "true":
-                            break
                     break
                 except Exception:
                     continue
@@ -538,10 +661,13 @@ class dn_Auth:
                 return False
 
             self.pid = cookies_dict["profile_id"]
+            self.profile_id = self.pid
+            self.auth_token = cookies_dict.get("auth_token", "")
 
             if "auth_token" in cookies_dict:
                 self.session.headers.update({
                     'Auth-Token': cookies_dict["auth_token"],
+                    'Authorization': f'Bearer {cookies_dict["auth_token"]}',
                     'Profile-Id': self.pid
                 })
 
@@ -568,48 +694,31 @@ class dn_Auth:
     #  FETCH-МЕТОДЫ
     # ================================================================
     def fetch(self, url, params=None):
-        """Выполнение GET-запроса через requests"""
         if not self.session:
             return None
-
         try:
-            if url.startswith('http'):
-                full_url = url
-            else:
-                full_url = urljoin(self.base, url)
-
+            full_url = url if url.startswith('http') else urljoin(self.base, url)
             response = self.session.get(full_url, params=params, timeout=self.timeout)
-
             if response.status_code != 200:
                 return None
-
             return response.json()
         except Exception:
             return None
 
     def fetch_paginated(self, url, params=None, page_size=1000):
-        """Выполнение запроса с пагинацией"""
         if not self.session:
             return None
-
         if params is None:
             params = {}
-
         all_data = []
         page = 1
-
         while True:
             params['page'] = page
             data = self.fetch(url, params)
-
             if not data:
                 break
-
             all_data.extend(data)
-
             if len(data) < page_size:
                 break
-
             page += 1
-
         return all_data

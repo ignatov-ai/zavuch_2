@@ -71,9 +71,9 @@ class MainWindow(QMainWindow):
         self.ktp_check_tab = KTPCheckTab(self)
         self.tabs.addTab(self.ktp_check_tab, "🔍 Проверка КТП")
 
-        # === ПОДКЛЮЧАЕМ СИГНАЛ АВТОРИЗАЦИИ ===
+        # === ПОДКЛЮЧАЕМ СИГНАЛ АВТОРИЗАЦИИ КО ВСЕМ ВКЛАДКАМ ===
         tabs_with_auth = [
-            self.download_tab,
+            self.download_tab,        # ← теперь тоже подписан
             self.check_tab,
             self.notify_tab,
             self.check_results_tab_5_9,
@@ -93,6 +93,13 @@ class MainWindow(QMainWindow):
 
         self.auth = auth_data
         self.auth_obj = auth_data
+
+        # Также прокидываем в SettingsTab
+        if hasattr(self.settings_tab, 'set_auth'):
+            try:
+                self.settings_tab.set_auth(auth_data)
+            except Exception:
+                pass
 
         # Передаём во все вкладки
         self.auth_updated.emit(auth_data)
