@@ -11,10 +11,8 @@ from excel_creator import create_class_marks_excel_file
 from journal_checker import JournalChecker
 
 
-# workers.py - добавить в ConnectionThread возможность остановки
-
 class ConnectionThread(QThread):
-    """Поток для проверки подключения через браузер"""
+    """Поток для проверки подключения через браузер (fallback)."""
     finished = Signal(bool, object)
     log = Signal(str)
 
@@ -42,35 +40,7 @@ class ConnectionThread(QThread):
             success = self.auth.login_from_browser(self.browser)
             self.finished.emit(success, self.auth if success else None)
 
-        except Exception as e:
-            self.finished.emit(False, None)
-
-
-class LoginAuthThread(QThread):
-    """Поток для авторизации по логину и паролю"""
-    finished = Signal(bool, object)
-    log = Signal(str)
-
-    def __init__(self, login, password):
-        super().__init__()
-        self.login = login
-        self.password = password
-        self.auth = None
-
-    def run(self):
-        try:
-            self.auth = dn_Auth("work", timeout=30)
-
-            # Пробуем загрузить сохраненную сессию
-            if self.auth.load_session():
-                self.finished.emit(True, self.auth)
-                return
-
-            # Используем Selenium для авторизации
-            success = self.auth.login_with_selenium(self.login, self.password)
-            self.finished.emit(success, self.auth if success else None)
-
-        except Exception as e:
+        except Exception:
             self.finished.emit(False, None)
 
 
@@ -89,15 +59,11 @@ class ClassesThread(QThread):
             if not self.auth or not self.auth.session:
                 self.finished.emit([])
                 return
-
             classes = self.collector.get_classes()
             self.finished.emit(classes)
-
-        except Exception as e:
+        except Exception:
             self.finished.emit([])
 
-
-# workers.py - только класс DownloadThread (остальные классы остаются без изменений)
 
 class DownloadThread(QThread):
     """Поток для скачивания журналов"""
@@ -110,17 +76,15 @@ class DownloadThread(QThread):
         self.auth = auth
         self.selected_by_level = selected_by_level
         self.base_output_folder = base_output_folder
-        self.collector = None  # Будет создан в run()
+        self.collector = None
         self._is_running = True
 
     def stop(self):
-        """Остановка потока скачивания"""
         self._is_running = False
         self.log_message.emit("⚠️ Остановка скачивания...")
 
     def run(self):
         try:
-            # Создаем коллектор внутри потока
             from collector import MarksDataCollector
             self.collector = MarksDataCollector(self.auth)
 
@@ -179,11 +143,9 @@ class DownloadThread(QThread):
                                     continue
                                 self.log_message.emit(f"      Учеников: {len(students)}")
 
-                                # Получаем отметки для группы
                                 marks = self.collector.get_marks_for_group(group_id)
                                 if not marks:
                                     self.log_message.emit(f"      Нет отметок")
-                                    # Продолжаем без отметок (только ученики)
                                     marks = []
 
                                 self.log_message.emit(f"      Отметок: {len(marks)}")
@@ -231,7 +193,6 @@ class DownloadThread(QThread):
                         percent = int(processed / total_classes * 100) if total_classes > 0 else 0
                         self.log_message.emit(f"⏳ Прогресс: {processed}/{total_classes} ({percent}%)")
 
-                    # Даем время на обработку событий
                     QApplication.processEvents()
 
             if not self._is_running:
@@ -268,7 +229,6 @@ class CheckJournalsThread(QThread):
         try:
             self.checker = JournalChecker()
 
-            # Проверяем существование файла учебного плана
             if not os.path.exists(self.curriculum_file):
                 self.log_message.emit(f"❌ Файл учебного плана не найден: {self.curriculum_file}")
                 self.finished.emit((0, 0))
@@ -284,11 +244,9 @@ class CheckJournalsThread(QThread):
 
             self.log_message.emit(f"✅ Учебный план загружен: {len(curriculum_data)} классов")
 
-            # Показываем примеры классов для отладки
             sample_classes = list(curriculum_data.keys())[:5]
             self.log_message.emit(f"   Примеры классов в УП: {', '.join(sample_classes)}")
 
-            # Группируем журналы по параллелям
             journals_by_level = {}
             for journal in self.selected_journals:
                 level = journal['level']
@@ -301,7 +259,6 @@ class CheckJournalsThread(QThread):
             total_files = len(self.selected_journals)
             error_files = 0
 
-            # Обрабатываем каждую параллель
             for level, journals in journals_by_level.items():
                 self.log_message.emit(f"\n📁 Проверка параллели {level}...")
                 level_results = []
@@ -310,7 +267,6 @@ class CheckJournalsThread(QThread):
                 for journal in journals:
                     file_path = journal['path']
 
-                    # Проверяем существование файла
                     if not os.path.exists(file_path):
                         self.log_message.emit(f"\n  ⚠️ Файл не найден: {journal['class_name']}")
                         error_files += 1
@@ -338,12 +294,10 @@ class CheckJournalsThread(QThread):
                         if stats:
                             self.log_message.emit(f"    📊 Записей в статистике: {len(stats)}")
 
-                # Сохраняем результаты для параллели
                 if level_stats or level_results:
                     all_results.extend(level_results)
                     all_stats.extend(level_stats)
 
-                    # Формируем имя периода для файла
                     if self.check_mode == "custom":
                         if self.start_date and self.end_date:
                             start_clean = self.start_date.replace('.', '')
@@ -361,11 +315,8 @@ class CheckJournalsThread(QThread):
                         }
                         period_name = period_names.get(self.check_mode, self.check_mode)
 
-                    # Очищаем имя от недопустимых символов
                     import re
                     period_name = re.sub(r'[\\/*?:"<>|]', '_', period_name)
-
-                    # Создаем папку для результатов, если её нет
                     os.makedirs(self.output_folder, exist_ok=True)
 
                     output_path = self.checker.save_results_to_excel(
@@ -375,7 +326,6 @@ class CheckJournalsThread(QThread):
                 else:
                     self.log_message.emit(f"\n  ⚠️ Нет данных для сохранения по параллели {level}")
 
-            # Итоговая статистика
             self.log_message.emit(f"\n📊 Итоги проверки:")
             self.log_message.emit(f"  Обработано файлов: {total_files}")
             self.log_message.emit(f"  Найдено замечаний: {len(all_results)}")

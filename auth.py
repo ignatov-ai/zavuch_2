@@ -28,14 +28,13 @@ class dn_Auth:
         self.session = None
         self.pid = ""
         self.sid = ""
-        self.aid = "13"
-        self.curr_aid = "13"
+        self.aid = "14"
+        self.curr_aid = "14"
 
-        # Хранимые отдельно токены
         self.auth_token = ""
         self.profile_id = ""
 
-        # НОВАЯ ПАПКА — отдельно от старой версии
+        # ✅ НОВАЯ ПАПКА
         self.session_dir = Path.home() / '.zavuch2'
         self.session_dir.mkdir(exist_ok=True)
         self.session_file = self.session_dir / 'session.pkl'

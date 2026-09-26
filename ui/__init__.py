@@ -1,2 +1,2 @@
-# Этот файл делает папку ui пакетом Python
-from ui.main_window import MainWindow
+# Этот файл делает папку ui пакетом Python.
+# НЕ импортируем MainWindow здесь, чтобы избежать циклического импорта.

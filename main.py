@@ -7,7 +7,6 @@
 import sys
 import os
 
-# Фикс для Qt плагинов на Windows
 if sys.platform == 'win32':
     possible_paths = [
         os.path.join(sys.prefix, 'Lib', 'site-packages', 'PySide6', 'plugins'),
@@ -25,7 +24,6 @@ from PySide6.QtGui import QFont
 from ui.auth_window import AuthWindow
 
 
-# Современная цветовая схема
 COLORS = {
     'primary': '#2563eb',
     'primary_hover': '#1d4ed8',
@@ -221,7 +219,7 @@ def main():
     font = QFont('Segoe UI', 10)
     app.setFont(font)
 
-    # Открываем окно авторизации
+    # Стартуем с окна авторизации
     auth_window = AuthWindow()
     auth_window.show()
 

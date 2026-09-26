@@ -6,11 +6,11 @@ from PySide6.QtWidgets import *
 from PySide6.QtCore import QThread, Signal, Qt
 from PySide6.QtGui import QColor
 
-from collector_ktp import KTPCollector
+from collector_ktp_main import KTPMainCollector
 
 
-class KTPLoadThread(QThread):
-    """Поток для загрузки списка групп"""
+class KTPMainLoadThread(QThread):
+    """Поток для загрузки списка групп основного расписания"""
     finished = Signal(list)
     error = Signal(str)
     log_message = Signal(str)
@@ -22,9 +22,27 @@ class KTPLoadThread(QThread):
 
     def run(self):
         try:
-            collector = KTPCollector(self.auth)
+            collector = KTPMainCollector(self.auth)
             collector.log_callback = lambda text: self.log_message.emit(text)
             groups = collector.get_all_groups()
+
+            # Добавляем URL журнала для каждой группы
+            for group in groups:
+                group_id = group.get('id')
+                class_unit_id = group.get('class_unit_id', '')
+
+                if group_id and class_unit_id:
+                    group['journal_url'] = (
+                        f"https://dnevnik.mos.ru/manage/journal"
+                        f"?from=journals&group_id={group_id}&class_unit_id={class_unit_id}"
+                    )
+                elif group_id:
+                    group['journal_url'] = (
+                        f"https://dnevnik.mos.ru/manage/journal?group_id={group_id}"
+                    )
+                else:
+                    group['journal_url'] = ''
+
             self.finished.emit(groups)
         except Exception as e:
             import traceback
@@ -33,8 +51,8 @@ class KTPLoadThread(QThread):
             self.finished.emit([])
 
 
-class KTPCheckThread(QThread):
-    """Поток для проверки КТП выбранных групп"""
+class KTPMainCheckThread(QThread):
+    """Поток для проверки КТП основного расписания"""
     progress_update = Signal(int, int, str)
     row_checked = Signal(dict)
     finished = Signal(int)
@@ -53,7 +71,7 @@ class KTPCheckThread(QThread):
 
     def run(self):
         try:
-            collector = KTPCollector(self.auth)
+            collector = KTPMainCollector(self.auth)
             collector.log_callback = lambda text: self.log_message.emit(text)
 
             total = len(self.groups_to_check)
@@ -61,7 +79,7 @@ class KTPCheckThread(QThread):
 
             for i, group in enumerate(self.groups_to_check):
                 if not self._is_running:
-                    self.log_message.emit("[KTP] ⏹️ Остановка проверки...")
+                    self.log_message.emit("[KTP-MAIN] ⏹️ Остановка проверки...")
                     break
 
                 group_id = group.get('id')
@@ -82,7 +100,7 @@ class KTPCheckThread(QThread):
                     self.row_checked.emit(group.copy())
                     checked += 1
                 except Exception as e:
-                    self.log_message.emit(f"[KTP] ❌ Ошибка для {group_name}: {e}")
+                    self.log_message.emit(f"[KTP-MAIN] ❌ Ошибка для {group_name}: {e}")
                     group['is_checked'] = True
                     group['has_ktp'] = False
                     group['lessons_with_names'] = 0
@@ -98,8 +116,8 @@ class KTPCheckThread(QThread):
             self.finished.emit(0)
 
 
-class KTPCheckTab(QWidget):
-    """Вкладка проверки КТП"""
+class KTPMainCheckTab(QWidget):
+    """Вкладка проверки КТП основного расписания (ОЧ+ФЧ)"""
 
     def __init__(self, parent):
         super().__init__()
@@ -109,13 +127,6 @@ class KTPCheckTab(QWidget):
         self.all_groups = []
         self.filtered_groups = []
         self.initUI()
-
-    def on_auth_updated(self, auth):
-        self.auth = auth
-        if auth:
-            self.load_btn.setEnabled(True)
-        else:
-            self.load_btn.setEnabled(False)
 
     def on_academic_year_updated(self, aid):
         self.academic_year_id = aid
@@ -222,7 +233,7 @@ class KTPCheckTab(QWidget):
 
         filter_layout.addWidget(QLabel("Поиск:"))
         self.search_edit = QLineEdit()
-        self.search_edit.setPlaceholderText("Название группы или активности...")
+        self.search_edit.setPlaceholderText("Название группы или предмета...")
         self.search_edit.setMinimumWidth(200)
         self.search_edit.textChanged.connect(self.apply_filter)
         filter_layout.addWidget(self.search_edit)
@@ -287,7 +298,7 @@ class KTPCheckTab(QWidget):
         self.groups_table.horizontalHeader().setStretchLastSection(True)
         self.groups_table.setColumnCount(8)
         self.groups_table.setHorizontalHeaderLabels([
-            '✓', 'Группа', 'Активность',
+            '✓', 'Группа', 'Предмет',
             'Параллель', 'Класс(ы)',
             'Учеников', 'КТП', 'Статус'
         ])
@@ -337,7 +348,7 @@ class KTPCheckTab(QWidget):
         academic_year_id = self.year_spin.value()
         self.academic_year_id = academic_year_id
 
-        self.load_thread = KTPLoadThread(self.auth, academic_year_id)
+        self.load_thread = KTPMainLoadThread(self.auth, academic_year_id)
         self.load_thread.finished.connect(self.on_load_finished)
         self.load_thread.error.connect(self.on_load_error)
         self.load_thread.log_message.connect(self.on_log_message)
@@ -421,7 +432,7 @@ class KTPCheckTab(QWidget):
 
         academic_year_id = self.year_spin.value()
 
-        self.check_thread = KTPCheckThread(self.auth, groups, academic_year_id)
+        self.check_thread = KTPMainCheckThread(self.auth, groups, academic_year_id)
         self.check_thread.progress_update.connect(self.on_check_progress)
         self.check_thread.row_checked.connect(self.on_row_checked)
         self.check_thread.finished.connect(self.on_check_finished)
@@ -441,7 +452,6 @@ class KTPCheckTab(QWidget):
             QApplication.processEvents()
 
     def on_row_checked(self, group):
-        """Обновление строки сразу после проверки"""
         for g in self.all_groups:
             if g['id'] == group['id']:
                 g.update({
@@ -451,12 +461,10 @@ class KTPCheckTab(QWidget):
                     'is_checked': True,
                 })
                 break
-
         self._update_row_in_table(group)
         self.update_stats()
 
     def _update_row_in_table(self, group):
-        """Обновление одной строки в таблице"""
         for i, g in enumerate(self.filtered_groups):
             if g['id'] == group['id']:
                 g.update({
@@ -552,7 +560,7 @@ class KTPCheckTab(QWidget):
         filtered = []
         for group in self.all_groups:
             if level_filter is not None:
-                if level_filter not in group.get('class_levels', []):
+                if level_filter not in group.get('class_levels', [group.get('_class_level')]):
                     continue
 
             if search_text:
@@ -611,20 +619,22 @@ class KTPCheckTab(QWidget):
             name_item.setToolTip(f"ID группы: {group['id']}")
             self.groups_table.setItem(i, 1, name_item)
 
-            # Колонка 2: Активность
+            # Колонка 2: Предмет
             self.groups_table.setItem(i, 2, QTableWidgetItem(group.get('activity_name', '')))
 
-            # Колонка 3: Параллель — в столбик
-            class_levels = group.get('class_levels', [])
-            parallel_text = '\n'.join(str(l) for l in sorted(class_levels)) if class_levels else ''
+            # Колонка 3: Параллель
+            class_level = group.get('_class_level') or group.get('class_level_id')
+            parallel_text = str(class_level) if class_level else ''
             parallel_item = QTableWidgetItem(parallel_text)
             parallel_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self.groups_table.setItem(i, 3, parallel_item)
 
-            # Колонка 4: Класс(ы) — в столбик
+            # Колонка 4: Класс(ы)
             class_names = group.get('class_unit_names', [])
             if not class_names:
-                class_names = [f"ID: {uid}" for uid in group.get('class_unit_ids', [])]
+                cu_name = group.get('class_unit_name')
+                if cu_name:
+                    class_names = [cu_name]
 
             class_text = '\n'.join(sorted(class_names)) if class_names else ''
             class_item = QTableWidgetItem(class_text)
@@ -664,7 +674,6 @@ class KTPCheckTab(QWidget):
 
             self.groups_table.setItem(i, 7, status_item)
 
-            # Закраска строки
             for col in [1, 2, 3, 4, 5, 6]:
                 item = self.groups_table.item(i, col)
                 if item:
@@ -673,8 +682,8 @@ class KTPCheckTab(QWidget):
         self.groups_table.setUpdatesEnabled(True)
         self.groups_table.setSortingEnabled(True)
         self.groups_table.setColumnWidth(0, 40)
-        self.groups_table.setColumnWidth(1, 200)
-        self.groups_table.setColumnWidth(2, 250)
+        self.groups_table.setColumnWidth(1, 250)
+        self.groups_table.setColumnWidth(2, 200)
         self.groups_table.setColumnWidth(3, 90)
         self.groups_table.setColumnWidth(4, 130)
         self.groups_table.setColumnWidth(5, 80)
@@ -728,8 +737,8 @@ class KTPCheckTab(QWidget):
     # ==================== ЭКСПОРТ ====================
 
     def export_to_excel(self):
-        if not self.filtered_groups:
-            QMessageBox.warning(self, "Ошибка", "Нет данных для экспорта")
+        if not self.missing_data:
+            QMessageBox.warning(self, "Ошибка", "Нет данных для экспорта!")
             return
 
         try:
@@ -739,30 +748,38 @@ class KTPCheckTab(QWidget):
             QMessageBox.warning(self, "Ошибка", "Модуль openpyxl не установлен")
             return
 
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        filename = f"Проверка_КТП_{timestamp}.xlsx"
+        class_name = self.selected_class["name"] if self.selected_class else "unknown"
+        student_name = self.selected_student_name.replace(" ", "_")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"Пропуски_{class_name}_{student_name}_{timestamp}.xlsx"
 
         file_path, _ = QFileDialog.getSaveFileName(
-            self, "Сохранить отчёт", filename, "Excel files (*.xlsx)"
+            self, "Сохранить Excel", filename, "Excel files (*.xlsx)"
         )
+
         if not file_path:
             return
 
         try:
-            wb = Workbook()
-            ws = wb.active
-            ws.title = "Проверка КТП"
+            from collections import defaultdict
 
-            headers = [
-                'ID группы', 'Группа', 'Активность', 'Параллель', 'Класс(ы)',
-                'Учеников', 'Уроков с названиями', 'Всего уроков',
-                'Статус КТП', 'URL журнала'
-            ]
+            wb = Workbook()
+
+            # ==========================================================
+            #  ЛИСТ 1: Детализация пропусков
+            # ==========================================================
+            ws = wb.active
+            ws.title = "Детализация"
+
+            headers = ["Класс", "ФИО ученика", "Дата", "Предмет",
+                       "Учитель", "Тема урока", "Причина пропуска"]
             ws.append(headers)
 
             header_font = Font(bold=True, color="FFFFFF", size=11)
-            header_fill = PatternFill(start_color="2C3E50", end_color="2C3E50", fill_type="solid")
-            header_alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+            header_fill = PatternFill(start_color="2C3E50", end_color="2C3E50",
+                                      fill_type="solid")
+            header_alignment = Alignment(horizontal='center', vertical='center',
+                                         wrap_text=True)
 
             for col in range(1, len(headers) + 1):
                 cell = ws.cell(row=1, column=col)
@@ -770,63 +787,131 @@ class KTPCheckTab(QWidget):
                 cell.fill = header_fill
                 cell.alignment = header_alignment
 
-            green_fill = PatternFill(start_color="DDFFDD", end_color="DDFFDD", fill_type="solid")
-            red_fill = PatternFill(start_color="FFDDDD", end_color="FFDDDD", fill_type="solid")
-            gray_fill = PatternFill(start_color="F5F5F5", end_color="F5F5F5", fill_type="solid")
+            for item in self.missing_data:
+                ws.append([
+                    self.selected_class["name"] if self.selected_class else "",
+                    self.selected_student_name,
+                    item["date"],
+                    item["subject"],
+                    item["teacher"],
+                    item["topic"],
+                    item["reason"]
+                ])
 
-            for group in self.filtered_groups:
-                if not group.get('is_checked'):
-                    status = '❓ Не проверено'
-                    fill = gray_fill
-                elif group.get('has_ktp'):
-                    status = '✅ Есть КТП'
-                    fill = green_fill
-                else:
-                    status = '❌ Нет КТП'
-                    fill = red_fill
-
-                class_levels = group.get('class_levels', [])
-                parallel_text = ', '.join(str(l) for l in sorted(class_levels))
-
-                class_names = group.get('class_unit_names', [])
-                class_text = ', '.join(sorted(class_names))
-
-                row_data = [
-                    group['id'],
-                    group.get('name', ''),
-                    group.get('activity_name', ''),
-                    parallel_text,
-                    class_text,
-                    group.get('student_count', 0),
-                    group.get('lessons_with_names', 0),
-                    group.get('total_lessons', 0),
-                    status,
-                    group.get('journal_url', '')
-                ]
-                ws.append(row_data)
-
-                row_idx = ws.max_row
-                for col in range(1, len(headers) + 1):
-                    cell = ws.cell(row=row_idx, column=col)
-                    cell.fill = fill
-
-            col_widths = {'A': 12, 'B': 25, 'C': 40, 'D': 12, 'E': 20,
-                          'F': 10, 'G': 18, 'H': 12, 'I': 15, 'J': 60}
+            col_widths = {'A': 12, 'B': 35, 'C': 12, 'D': 25,
+                          'E': 25, 'F': 40, 'G': 20}
             for col_letter, width in col_widths.items():
                 ws.column_dimensions[col_letter].width = width
 
             ws.auto_filter.ref = ws.dimensions
             ws.freeze_panes = 'A2'
 
+            # ==========================================================
+            #  ЛИСТ 2: Сводка по предметам
+            # ==========================================================
+            ws2 = wb.create_sheet("Сводка по предметам")
+
+            # Заголовок листа — информация об ученике и периоде
+            ws2.cell(row=1, column=1, value="Сводка пропусков по предметам")
+            ws2.cell(row=1, column=1).font = Font(bold=True, size=13)
+            ws2.merge_cells(start_row=1, start_column=1, end_row=1, end_column=2)
+
+            ws2.cell(row=2, column=1,
+                     value=f"Класс: {self.selected_class['name'] if self.selected_class else '-'}")
+            ws2.cell(row=2, column=1).font = Font(bold=True)
+            ws2.merge_cells(start_row=2, start_column=1, end_row=2, end_column=2)
+
+            ws2.cell(row=3, column=1, value=f"Ученик: {self.selected_student_name}")
+            ws2.cell(row=3, column=1).font = Font(bold=True)
+            ws2.merge_cells(start_row=3, start_column=1, end_row=3, end_column=2)
+
+            period_start = self.start_date_edit.date().toString("dd.MM.yyyy")
+            period_end = self.end_date_edit.date().toString("dd.MM.yyyy")
+            ws2.cell(row=4, column=1, value=f"Период: {period_start} — {period_end}")
+            ws2.cell(row=4, column=1).font = Font(bold=True)
+            ws2.merge_cells(start_row=4, start_column=1, end_row=4, end_column=2)
+
+            ws2.cell(row=5, column=1, value=f"Всего пропусков: {len(self.missing_data)}")
+            ws2.cell(row=5, column=1).font = Font(bold=True, color="C00000")
+            ws2.merge_cells(start_row=5, start_column=1, end_row=5, end_column=2)
+
+            # Заголовки таблицы сводки
+            summary_headers = ["Предмет", "Количество пропусков"]
+            summary_header_row = 7
+
+            for col_idx, header in enumerate(summary_headers, start=1):
+                cell = ws2.cell(row=summary_header_row, column=col_idx,
+                                value=header)
+                cell.font = header_font
+                cell.fill = header_fill
+                cell.alignment = header_alignment
+
+            # Считаем пропуски по предметам
+            subjects_count = defaultdict(int)
+            for item in self.missing_data:
+                subjects_count[item["subject"]] += 1
+
+            # Сортируем: сначала по убыванию количества, потом по алфавиту
+            sorted_subjects = sorted(
+                subjects_count.items(),
+                key=lambda x: (-x[1], x[0])
+            )
+
+            row_idx = summary_header_row + 1
+            for subject, count in sorted_subjects:
+                ws2.cell(row=row_idx, column=1, value=subject)
+                ws2.cell(row=row_idx, column=2, value=count)
+                row_idx += 1
+
+            # Итоговая строка
+            ws2.cell(row=row_idx, column=1, value="ИТОГО")
+            ws2.cell(row=row_idx, column=1).font = Font(bold=True)
+            ws2.cell(row=row_idx, column=2, value=len(self.missing_data))
+            ws2.cell(row=row_idx, column=2).font = Font(bold=True)
+
+            # Границы для таблицы сводки
+            from openpyxl.styles import Border, Side
+            thin = Side(style='thin', color="999999")
+            border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+            for r in range(summary_header_row, row_idx + 1):
+                for c in (1, 2):
+                    cell = ws2.cell(row=r, column=c)
+                    cell.border = border
+                    if r > summary_header_row:
+                        cell.alignment = Alignment(
+                            horizontal='left' if c == 1 else 'center',
+                            vertical='center'
+                        )
+
+            # Ширина колонок
+            ws2.column_dimensions['A'].width = 45
+            ws2.column_dimensions['B'].width = 22
+
+            # ==========================================================
+            #  СОХРАНЯЕМ
+            # ==========================================================
             wb.save(file_path)
+            self.log_signal.emit(f"✅ Excel экспортирован: {file_path}")
+            self.log_signal.emit(
+                f"   📄 Лист 1: Детализация ({len(self.missing_data)} записей)"
+            )
+            self.log_signal.emit(
+                f"   📄 Лист 2: Сводка по предметам ({len(sorted_subjects)} предметов)"
+            )
 
             reply = QMessageBox.question(
                 self, "Готово",
-                f"Отчёт сохранён:\n{file_path}\n\nОткрыть файл?",
+                f"Файл сохранён:\n{file_path}\n\n"
+                f"• Лист «Детализация»: {len(self.missing_data)} пропусков\n"
+                f"• Лист «Сводка по предметам»: {len(sorted_subjects)} предметов\n\n"
+                "Открыть файл?",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
             )
             if reply == QMessageBox.StandardButton.Yes:
                 os.startfile(file_path)
 
         except Exception as e:
-            QMessageBox.critical(self, "Ошибка", f"Не удалось сохранить отчёт:\n{e}")
+            self.log_signal.emit(f"❌ Ошибка экспорта: {str(e)}")
+            QMessageBox.critical(self, "Ошибка",
+                                 f"Не удалось сохранить файл:\n{str(e)}")

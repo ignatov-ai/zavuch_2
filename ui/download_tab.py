@@ -2,7 +2,6 @@
 """
 Вкладка скачивания журналов.
 Авторизация приходит из MainWindow через сигнал auth_updated.
-Панель логина/пароля убрана.
 """
 from collections import defaultdict
 from PySide6.QtWidgets import *
@@ -35,21 +34,6 @@ class DownloadTab(QWidget):
         main_layout = QVBoxLayout(self)
         main_layout.setSpacing(10)
         main_layout.setContentsMargins(15, 15, 15, 15)
-
-        # --- Только индикатор статуса авторизации ---
-        status_group = QGroupBox("Авторизация")
-        status_layout = QHBoxLayout(status_group)
-
-        self.auth_status_label = QLabel("⏳ Ожидание авторизации")
-        self.auth_status_label.setStyleSheet("color: #f39c12; font-weight: bold;")
-        status_layout.addWidget(self.auth_status_label)
-        status_layout.addStretch()
-
-        hint = QLabel("ℹ️ Авторизация выполняется автоматически при запуске.")
-        hint.setStyleSheet("color: #666; font-size: 9pt;")
-        status_layout.addWidget(hint)
-
-        main_layout.addWidget(status_group)
 
         # --- Кнопка получения классов ---
         top_btn_layout = QHBoxLayout()
@@ -138,15 +122,9 @@ class DownloadTab(QWidget):
     #  АВТОРИЗАЦИЯ ИЗ MAINWINDOW
     # ------------------------------------------------------------------
     def on_auth_updated(self, auth):
-        """
-        Слот для сигнала MainWindow.auth_updated.
-        Вызывается автоматически после авторизации в AuthWindow.
-        """
+        """Слот для сигнала MainWindow.auth_updated."""
         self.auth = auth
         if auth:
-            self.auth_status_label.setText("✅ Авторизован")
-            self.auth_status_label.setStyleSheet("color: #27ae60; font-weight: bold;")
-
             from collector import MarksDataCollector
             self.collector = MarksDataCollector(self.auth)
 
@@ -154,8 +132,6 @@ class DownloadTab(QWidget):
             self.select_folder_btn.setEnabled(True)
             self.append_to_console("✅ Авторизация получена. Можно получать классы.")
         else:
-            self.auth_status_label.setText("❌ Не авторизован")
-            self.auth_status_label.setStyleSheet("color: #c0392b; font-weight: bold;")
             self.get_classes_btn.setEnabled(False)
             self.select_folder_btn.setEnabled(False)
 
