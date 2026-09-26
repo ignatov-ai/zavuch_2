@@ -3,16 +3,26 @@
 Окно авторизации. Открывается при старте приложения.
 После успешного входа создаёт MainWindow.
 
-Две кнопки входа:
-  • «Войти с использованием браузера» — Selenium + 2FA + сохранение сессии.
-  • «Войти используя имеющиеся данные» — загрузка session.pkl без браузера.
+Способы входа:
+  1. 📂 Войти используя имеющиеся данные
+        → ~/.zavuch2/session.pkl (текущая сохранённая сессия этой версии)
+  2. 📁 Обзор… + ✅ Использовать выбранный файл
+        → импорт session.pkl с любого пути (например, с другого ПК)
+  3. 🌐 Войти с использованием браузера
+        → Selenium + 2FA + сохранение в ~/.zavuch2/
+  4. 👁 Монитор сессии
+        → запускает session_monitor.py отдельным процессом; ловит токен
+          из Chrome, запущенного с --remote-debugging-port=9222
+  5. 📋 Импорт токенов
+        → диалог вставки auth_token/aupd_token из DevTools
+          (для случаев, когда вы уже залогинены в Chrome)
 
-После Selenium-входа браузер НЕ закрывается автоматически.
-Появляется попап «Куки получены» с кнопками «OK» и «Закрыть браузер».
+Все файлы новой версии хранятся в ~/.zavuch2/ (НЕ трогаем ~/.ejd_checker/).
 """
 import sys
 import json
 import pickle
+import shutil
 import threading
 import time
 from pathlib import Path
@@ -24,11 +34,13 @@ from PySide6.QtCore import Qt, QThread, Signal, QTimer
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
     QPushButton, QCheckBox, QComboBox, QPlainTextEdit,
-    QMessageBox, QFrame, QStackedWidget
+    QMessageBox, QFrame, QStackedWidget, QFileDialog,
+    QGroupBox
 )
 
 
-DATA_DIR = Path.home() / ".ejd_checker"
+# === НОВАЯ ПАПКА ДЛЯ НОВОЙ ВЕРСИИ ===
+DATA_DIR = Path.home() / ".zavuch2"
 DATA_DIR.mkdir(exist_ok=True)
 SESSION_FILE = DATA_DIR / "session.pkl"
 CREDENTIALS_FILE = DATA_DIR / "credentials.json"
@@ -76,18 +88,9 @@ def clear_session():
 
 
 # ============================================================
-#  Проверка сохранённой сессии (без побочных эффектов)
+#  Проверка сохранённой сессии
 # ============================================================
 def check_saved_session() -> dict:
-    """
-    Проверяет сохранённую сессию через API dnevnik.mos.ru.
-    Возвращает dict:
-        ok: bool
-        reason: str
-        school: str | None
-        profile_id: str | None
-        auth_obj: dn_Auth | None
-    """
     result = {
         "ok": False, "reason": "", "school": None,
         "profile_id": None, "auth_obj": None
@@ -101,7 +104,6 @@ def check_saved_session() -> dict:
         from auth import dn_Auth
         auth = dn_Auth()
         if auth.load_session():
-            # load_session уже проверил API и заполнил sid/pid
             result["ok"] = True
             result["school"] = f"school_id={auth.sid}"
             result["profile_id"] = auth.pid
@@ -117,7 +119,7 @@ def check_saved_session() -> dict:
 
 
 # ============================================================
-#  Поток проверки сессии (для автозапуска при старте)
+#  Потоки
 # ============================================================
 class SessionCheckWorker(QThread):
     done = Signal(dict)
@@ -126,27 +128,72 @@ class SessionCheckWorker(QThread):
         self.done.emit(check_saved_session())
 
 
-# ============================================================
-#  Поток ручной загрузки cookies («Войти используя имеющиеся данные»)
-# ============================================================
 class LoadCookiesWorker(QThread):
-    """Просто вызывает check_saved_session в фоне, чтобы UI не зависал."""
+    """Загрузка текущего ~/.zavuch2/session.pkl."""
     done = Signal(dict)
 
     def run(self):
         self.done.emit(check_saved_session())
 
 
-# ============================================================
-#  Поток авторизации (Selenium)
-# ============================================================
+class ImportedSessionCheckWorker(QThread):
+    """
+    Копирует указанный пользователем файл сессии в ~/.zavuch2/session.pkl
+    и пробует залогиниться.
+    Если рядом с исходным файлом лежит auth_data.json — тоже копирует.
+    """
+    done = Signal(dict)
+
+    def __init__(self, source_path: str, copy_adjacent_auth_data: bool = True):
+        super().__init__()
+        self.source_path = source_path
+        self.copy_adjacent_auth_data = copy_adjacent_auth_data
+
+    def run(self):
+        result = {"ok": False, "reason": "", "auth_obj": None}
+
+        try:
+            src = Path(self.source_path)
+            if not src.exists():
+                result["reason"] = f"Файл не найден: {src}"
+                self.done.emit(result)
+                return
+
+            try:
+                DATA_DIR.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(str(src), str(SESSION_FILE))
+            except Exception as e:
+                result["reason"] = f"Не удалось скопировать файл: {e}"
+                self.done.emit(result)
+                return
+
+            if self.copy_adjacent_auth_data:
+                adjacent = src.parent / "auth_data.json"
+                if adjacent.exists():
+                    try:
+                        shutil.copy2(str(adjacent), str(AUTH_DATA_FILE))
+                    except Exception:
+                        pass
+
+            from auth import dn_Auth
+            auth = dn_Auth()
+            if auth.load_session():
+                result["ok"] = True
+                result["auth_obj"] = auth
+                result["reason"] = f"Сессия из {src.name} рабочая"
+            else:
+                result["reason"] = (
+                    "Файл скопирован, но API не принял сессию.\n"
+                    "Вероятно, токен устарел или привязан к другому устройству.\n\n"
+                    "Можно попробовать войти через браузер."
+                )
+        except Exception as e:
+            result["reason"] = f"Ошибка: {e}"
+
+        self.done.emit(result)
+
+
 class AuthWorker(QThread):
-    """
-    Авторизация через Selenium.
-    После успеха показывает попап «Куки получены» через сигнал cookies_ready.
-    Браузер закрывается только если пользователь нажал «Закрыть браузер».
-    При нажатии OK — браузер остаётся открытым, поток отвязывается.
-    """
     log = Signal(str)
     finished_ok = Signal(object)
     finished_err = Signal(str)
@@ -159,8 +206,8 @@ class AuthWorker(QThread):
         self.password = password
         self.totp_key = totp_key or ""
         self.browser = browser
-        self._close_browser_event = threading.Event()   # «Закрыть браузер»
-        self._detach_browser_event = threading.Event()  # «OK — оставить»
+        self._close_browser_event = threading.Event()
+        self._detach_browser_event = threading.Event()
         self._current_driver = None
 
     def _log(self, msg: str):
@@ -168,12 +215,6 @@ class AuthWorker(QThread):
         self.log.emit(msg)
 
     def _gui_confirm(self, driver, auth_obj):
-        """
-        Вызывается из потока Selenium после успешного получения cookies.
-        Просит GUI показать попап и ждёт:
-          • _close_browser_event — пользователь нажал «Закрыть браузер»
-          • _detach_browser_event — пользователь нажал «OK»
-        """
         self._current_driver = driver
         self.cookies_ready.emit()
 
@@ -241,11 +282,12 @@ class AuthWindow(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("ЭЖД МЭШ — Вход")
-        self.setMinimumSize(640, 680)
+        self.setMinimumSize(680, 900)
 
         self.auth = None
         self.check_worker = None
         self.load_cookies_worker = None
+        self.import_worker = None
         self.auth_worker = None
         self.main_window = None
 
@@ -298,8 +340,11 @@ class AuthWindow(QWidget):
 
         hint = QLabel(
             "Выберите способ входа:\n"
-            "• «Используя имеющиеся данные» — если уже входили ранее (cookies сохранены).\n"
-            "• «С использованием браузера» — если нужно авторизоваться заново (Selenium + 2FA)."
+            "• «Используя имеющиеся данные» — если уже входили в этой версии.\n"
+            "• «Импорт файла сессии» — если нужно подключить session.pkl с другого ПК.\n"
+            "• «С использованием браузера» — если нужно авторизоваться заново (Selenium + 2FA).\n"
+            "• «Монитор сессии» — ловит токен из Chrome с --remote-debugging-port=9222.\n"
+            "• «Импорт токенов» — вставить auth_token/aupd_token из DevTools вручную."
         )
         hint.setAlignment(Qt.AlignCenter)
         hint.setWordWrap(True)
@@ -321,7 +366,58 @@ class AuthWindow(QWidget):
         self.load_cookies_btn.clicked.connect(self.on_login_with_cookies)
 
         # ============================================================
-        #  КНОПКА 2: Войти с использованием браузера
+        #  БЛОК ИМПОРТА: поле пути + Обзор + Использовать
+        # ============================================================
+        import_group = QGroupBox("📁 Импорт файла сессии с другого компьютера")
+        import_group.setStyleSheet("""
+            QGroupBox {
+                font-weight: bold; font-size: 10pt;
+                border: 1px solid #cccccc; border-radius: 8px;
+                margin-top: 8px; padding-top: 10px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin; left: 10px;
+                padding: 0 6px 0 6px; color: #4b5563;
+            }
+        """)
+        import_layout = QVBoxLayout(import_group)
+        import_layout.setSpacing(6)
+
+        file_row = QHBoxLayout()
+        file_row.setSpacing(6)
+
+        self.session_path_edit = QLineEdit()
+        self.session_path_edit.setPlaceholderText(
+            "Путь к файлу session.pkl (например, с другого ПК)"
+        )
+        self.session_path_edit.setMinimumHeight(34)
+        self.session_path_edit.textChanged.connect(self._update_use_file_btn)
+        file_row.addWidget(self.session_path_edit, 1)
+
+        self.browse_session_btn = QPushButton("📁 Обзор…")
+        self.browse_session_btn.setMinimumHeight(34)
+        self.browse_session_btn.setMaximumWidth(100)
+        self.browse_session_btn.clicked.connect(self.on_browse_session_file)
+        file_row.addWidget(self.browse_session_btn)
+
+        import_layout.addLayout(file_row)
+
+        self.use_session_file_btn = QPushButton("✅ Использовать выбранный файл")
+        self.use_session_file_btn.setMinimumHeight(38)
+        self.use_session_file_btn.setEnabled(False)
+        self.use_session_file_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #6b7280; color: white; font-size: 10pt;
+                font-weight: bold; border-radius: 8px;
+            }
+            QPushButton:hover { background-color: #4b5563; }
+            QPushButton:disabled { background-color: #cccccc; color: #888888; }
+        """)
+        self.use_session_file_btn.clicked.connect(self.on_use_selected_file)
+        import_layout.addWidget(self.use_session_file_btn)
+
+        # ============================================================
+        #  КНОПКА 3: Войти с использованием браузера
         # ============================================================
         self.login_btn = QPushButton("🌐 Войти с использованием браузера")
         self.login_btn.setMinimumHeight(42)
@@ -335,12 +431,55 @@ class AuthWindow(QWidget):
         """)
         self.login_btn.clicked.connect(self.on_login_with_browser)
 
-        # --- Разделитель «или» ---
-        or_label = QLabel("─  или введите логин и пароль ниже  ─")
+        # ============================================================
+        #  КНОПКА 4: Монитор сессии
+        # ============================================================
+        self.monitor_btn = QPushButton("👁 Монитор сессии")
+        self.monitor_btn.setMinimumHeight(34)
+        self.monitor_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #8b5cf6; color: white; font-size: 10pt;
+                font-weight: bold; border-radius: 8px;
+            }
+            QPushButton:hover { background-color: #7c3aed; }
+            QPushButton:disabled { background-color: #cccccc; color: #888888; }
+        """)
+        self.monitor_btn.setToolTip(
+            "Запустить отдельный процесс, который будет ловить auth_token "
+            "из Chrome (запущенного с --remote-debugging-port=9222)"
+        )
+        self.monitor_btn.clicked.connect(self.on_start_monitor)
+
+        # ============================================================
+        #  КНОПКА 5: Импорт токенов (вставить из буфера)
+        # ============================================================
+        self.import_tokens_btn = QPushButton("📋 Импорт токенов")
+        self.import_tokens_btn.setMinimumHeight(34)
+        self.import_tokens_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #0ea5e9; color: white; font-size: 10pt;
+                font-weight: bold; border-radius: 8px;
+            }
+            QPushButton:hover { background-color: #0284c7; }
+            QPushButton:disabled { background-color: #cccccc; color: #888888; }
+        """)
+        self.import_tokens_btn.setToolTip(
+            "Вставить auth_token / aupd_token из DevTools браузера — "
+            "для случаев, когда сессия уже есть в обычном Chrome"
+        )
+        self.import_tokens_btn.clicked.connect(self.on_open_token_dialog)
+
+        # --- Подсказка про текущий путь ---
+        path_hint = QLabel(f"ℹ️ Текущая сессия хранится в:\n{DATA_DIR}")
+        path_hint.setAlignment(Qt.AlignCenter)
+        path_hint.setStyleSheet("color: #999; font-size: 8pt; padding: 2px;")
+        path_hint.setWordWrap(True)
+
+        or_label = QLabel("─  или введите логин и пароль для браузерного входа  ─")
         or_label.setAlignment(Qt.AlignCenter)
         or_label.setStyleSheet("color: #999; font-size: 9pt; padding: 6px;")
 
-        # --- Поля ввода (для браузерной авторизации) ---
+        # --- Поля ввода для Selenium ---
         self.login_edit = QLineEdit()
         self.login_edit.setPlaceholderText("Логин (телефон, email или СНИЛС)")
         self.login_edit.setMinimumHeight(34)
@@ -351,7 +490,9 @@ class AuthWindow(QWidget):
         self.password_edit.setMinimumHeight(34)
 
         self.totp_edit = QLineEdit()
-        self.totp_edit.setPlaceholderText("TOTP-ключ (Base32; можно пусто — SMS вручную)")
+        self.totp_edit.setPlaceholderText(
+            "TOTP-ключ (Base32; можно пусто — SMS вручную)"
+        )
         self.totp_edit.setMinimumHeight(34)
 
         self.show_password_cb = QCheckBox("Показывать пароль")
@@ -386,7 +527,11 @@ class AuthWindow(QWidget):
         layout.addWidget(hint)
         layout.addSpacing(4)
         layout.addWidget(self.load_cookies_btn)
+        layout.addWidget(import_group)
         layout.addWidget(self.login_btn)
+        layout.addWidget(self.monitor_btn)
+        layout.addWidget(self.import_tokens_btn)
+        layout.addWidget(path_hint)
         layout.addWidget(or_label)
         layout.addWidget(self.login_edit)
         layout.addWidget(self.password_edit)
@@ -480,13 +625,13 @@ class AuthWindow(QWidget):
     #  КНОПКА 1: Войти используя имеющиеся данные
     # ==================================================================
     def on_login_with_cookies(self):
-        """Пробует зайти по сохранённым cookies БЕЗ браузера."""
         if not SESSION_FILE.exists():
             QMessageBox.warning(
                 self, "Нет сохранённых данных",
-                "Файл session.pkl не найден.\n\n"
-                "Сначала войдите через браузер — тогда cookies сохранятся, "
-                "и эта кнопка заработает."
+                f"Файл session.pkl не найден по пути:\n{SESSION_FILE}\n\n"
+                "Можно импортировать файл через блок «📁 Импорт файла сессии»,\n"
+                "либо вставить токен через «📋 Импорт токенов»,\n"
+                "либо войти через браузер."
             )
             return
 
@@ -511,11 +656,80 @@ class AuthWindow(QWidget):
                 self, "Cookies не подошли",
                 f"Сохранённые cookies не приняты сервером.\n\n"
                 f"Причина: {reason}\n\n"
-                "Войдите с использованием браузера."
+                "Можно войти с использованием браузера."
             )
 
     # ==================================================================
-    #  КНОПКА 2: Войти с использованием браузера
+    #  БЛОК ИМПОРТА: Обзор и Использовать
+    # ==================================================================
+    def on_browse_session_file(self):
+        start_dir = str(Path.home())
+
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Выберите файл сессии (session.pkl)",
+            start_dir,
+            "Pickle session files (*.pkl);;Все файлы (*.*)"
+        )
+
+        if not file_path:
+            return
+
+        self.session_path_edit.setText(file_path)
+        self.append_log(f"[i] Выбран файл: {file_path}")
+        self.append_log("[i] Нажмите «✅ Использовать выбранный файл» для импорта.")
+
+    def _update_use_file_btn(self, text: str):
+        path_str = (text or "").strip()
+        self.use_session_file_btn.setEnabled(bool(path_str))
+
+    def on_use_selected_file(self):
+        file_path = self.session_path_edit.text().strip()
+        if not file_path:
+            QMessageBox.warning(self, "Ошибка", "Сначала выберите файл сессии.")
+            return
+
+        src = Path(file_path)
+        if not src.exists():
+            QMessageBox.warning(
+                self, "Файл не найден",
+                f"Файл не существует:\n{src}"
+            )
+            return
+
+        if SESSION_FILE.exists():
+            answer = QMessageBox.question(
+                self, "Подтверждение",
+                f"Текущая сессия уже существует:\n{SESSION_FILE}\n\n"
+                f"Заменить её на выбранный файл?\n{src}",
+                QMessageBox.Yes | QMessageBox.No,
+            )
+            if answer != QMessageBox.Yes:
+                return
+
+        self._set_ui_enabled(False)
+        self.append_log(f"[i] Импортирую файл сессии: {src}")
+
+        self.import_worker = ImportedSessionCheckWorker(str(src))
+        self.import_worker.done.connect(self._on_import_finished)
+        self.import_worker.start()
+
+    def _on_import_finished(self, result: dict):
+        self._set_ui_enabled(True)
+
+        if result.get("ok"):
+            self.append_log(f"[+] {result.get('reason')}")
+            self.auth = result.get("auth_obj")
+            QTimer.singleShot(300, self._open_main_window)
+        else:
+            self.append_log(f"[!] {result.get('reason')}")
+            QMessageBox.warning(
+                self, "Сессия не подошла",
+                result.get("reason", "Неизвестная ошибка")
+            )
+
+    # ==================================================================
+    #  КНОПКА 3: Войти с использованием браузера
     # ==================================================================
     def on_login_with_browser(self):
         login = self.login_edit.text().strip()
@@ -584,10 +798,91 @@ class AuthWindow(QWidget):
         self.append_log(f"[!] {err}")
         QMessageBox.critical(self, "Ошибка входа", err)
 
+    # ==================================================================
+    #  КНОПКА 4: Монитор сессии
+    # ==================================================================
+    def on_start_monitor(self):
+        import subprocess
+        import sys as _sys
+        from pathlib import Path as _Path
+
+        project_root = _Path(__file__).resolve().parent.parent
+        monitor_script = project_root / "session_monitor.py"
+
+        if not monitor_script.exists():
+            QMessageBox.warning(
+                self, "Не найден монитор",
+                f"Файл не найден:\n{monitor_script}\n\n"
+                "Сохраните session_monitor.py в корень проекта."
+            )
+            return
+
+        answer = QMessageBox.question(
+            self, "Монитор сессии",
+            "Запустить монитор сессии?\n\n"
+            "⚠️ Требуется Chrome, запущенный с флагом:\n"
+            "--remote-debugging-port=9222\n\n"
+            "Откроется окно консоли — там будет виден лог монитора.\n"
+            "Как только токен будет пойман, сессия сохранится в ~/.zavuch2/,\n"
+            "а монитор завершится.\n\n"
+            "Потом нажмите «📂 Войти используя имеющиеся данные».\n\n"
+            "Продолжить?",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+
+        try:
+            if _sys.platform == "win32":
+                subprocess.Popen(
+                    ["cmd", "/k", _sys.executable, str(monitor_script)],
+                    cwd=str(project_root),
+                    creationflags=subprocess.CREATE_NEW_CONSOLE,
+                )
+            else:
+                subprocess.Popen(
+                    [_sys.executable, str(monitor_script)],
+                    cwd=str(project_root),
+                )
+            self.append_log(f"[i] Монитор запущен: {monitor_script}")
+            self.append_log("[i] Следите за окном консоли.")
+        except Exception as e:
+            QMessageBox.critical(
+                self, "Ошибка запуска",
+                f"Не удалось запустить монитор:\n{e}"
+            )
+
+    # ==================================================================
+    #  КНОПКА 5: Импорт токенов (диалог)
+    # ==================================================================
+    def on_open_token_dialog(self):
+        """Открывает диалог импорта токенов."""
+        from ui.token_import_dialog import TokenImportDialog
+
+        dlg = TokenImportDialog(self)
+        dlg.tokens_saved.connect(self._on_tokens_saved)
+        dlg.exec()
+
+    def _on_tokens_saved(self, auth):
+        """Вызывается после успешного сохранения токенов в диалоге."""
+        if auth is None:
+            return
+        self.append_log("[+] Токены импортированы, открываю главное окно…")
+        self.auth = auth
+        QTimer.singleShot(300, self._open_main_window)
+
     # ------------------------------------------------------------------
     def _set_ui_enabled(self, enabled: bool):
         self.login_btn.setEnabled(enabled)
         self.load_cookies_btn.setEnabled(enabled)
+        self.browse_session_btn.setEnabled(enabled)
+        self.monitor_btn.setEnabled(enabled)
+        self.import_tokens_btn.setEnabled(enabled)
+        if enabled:
+            self._update_use_file_btn(self.session_path_edit.text())
+        else:
+            self.use_session_file_btn.setEnabled(False)
+        self.session_path_edit.setEnabled(enabled)
         self.login_edit.setEnabled(enabled)
         self.password_edit.setEnabled(enabled)
         self.totp_edit.setEnabled(enabled)

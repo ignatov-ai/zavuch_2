@@ -5,10 +5,9 @@
 Основной способ: Selenium + webdriver-manager + CDP.
 Резервный: cookies браузера через browser_cookie3.
 
-Ключевое отличие от предыдущей версии:
-  • save_session() дублирует auth_token/profile_id в cookies session.pkl.
-  • load_session() умеет читать auth_token из cookies И из auth_data.json.
-  • При успешной авторизации сохраняется ~/.ejd_checker/auth_data.json.
+ВСЕ файлы сессии хранятся в ~/.zavuch2/ (отдельно от старой версии ~/.ejd_checker/):
+  • session.pkl      — cookies dnevnik.mos.ru
+  • auth_data.json   — auth_token, profile_id, school_id
 """
 import requests
 from urllib.parse import urljoin
@@ -29,15 +28,15 @@ class dn_Auth:
         self.session = None
         self.pid = ""
         self.sid = ""
-        self.aid = "13"  # ID учебного года 2025-2026
+        self.aid = "13"
         self.curr_aid = "13"
 
-        # Хранимые отдельно токены — на случай, если их нет в cookies
+        # Хранимые отдельно токены
         self.auth_token = ""
         self.profile_id = ""
 
-        # Директория для сохранения сессий
-        self.session_dir = Path.home() / '.ejd_checker'
+        # НОВАЯ ПАПКА — отдельно от старой версии
+        self.session_dir = Path.home() / '.zavuch2'
         self.session_dir.mkdir(exist_ok=True)
         self.session_file = self.session_dir / 'session.pkl'
         self.auth_data_file = self.session_dir / 'auth_data.json'
@@ -46,7 +45,6 @@ class dn_Auth:
     #  СОХРАНЕНИЕ / ЗАГРУЗКА СЕССИИ
     # ================================================================
     def _save_auth_data(self):
-        """Сохраняет auth_token, profile_id и school_id в отдельный JSON."""
         try:
             data = {
                 "auth_token": self.auth_token or "",
@@ -60,7 +58,6 @@ class dn_Auth:
             return False
 
     def _load_auth_data(self):
-        """Загружает auth_token/profile_id из auth_data.json."""
         try:
             if not self.auth_data_file.exists():
                 return False
@@ -77,11 +74,6 @@ class dn_Auth:
             return False
 
     def save_session(self):
-        """
-        Сохраняет сессию.
-        ВАЖНО: если auth_token/profile_id есть в self, но их нет в cookies —
-        дублируем их в cookies, чтобы load_session() их нашёл.
-        """
         if not self.session:
             return False
         try:
@@ -104,7 +96,6 @@ class dn_Auth:
             return False
 
     def load_session(self):
-        """Загружает сохранённую сессию и проверяет её через API."""
         try:
             if not self.session_file.exists():
                 return False
@@ -171,13 +162,6 @@ class dn_Auth:
                                      totp_key=None, browser='chrome',
                                      log_callback=None,
                                      gui_confirm_callback=None):
-        """
-        Продвинутая авторизация через Selenium с поддержкой 2FA.
-
-        gui_confirm_callback(driver, auth_obj) — вызывается после успешного
-        получения cookies и проверки API. Внутри GUI-поток показывает попап
-        «Куки получены» и ждёт нажатия пользователя.
-        """
         import tempfile
         import traceback
 
@@ -200,7 +184,6 @@ class dn_Auth:
             from selenium.webdriver.support.ui import WebDriverWait
             from selenium.webdriver.support import expected_conditions as EC
 
-            # --- Создаём драйвер ---
             if browser == 'firefox':
                 from selenium.webdriver.firefox.options import Options as FirefoxOptions
                 from selenium.webdriver.firefox.service import Service as FirefoxService
@@ -216,7 +199,6 @@ class dn_Auth:
                 from webdriver_manager.chrome import ChromeDriverManager
 
                 options = ChromeOptions()
-
                 temp_profile_dir = tempfile.mkdtemp(prefix="selenium_chrome_")
                 options.add_argument(f"--user-data-dir={temp_profile_dir}")
                 options.add_argument("--disable-features=ProfilePicker,WelcomeExperience")
@@ -248,9 +230,6 @@ class dn_Auth:
 
             log("[+] Браузер запущен")
 
-            # ============================================================
-            #  ШАГ 1: Открываем страницу входа
-            # ============================================================
             login_url = (
                 "https://login.mos.ru/sps/login/methods/password"
                 "?bo=%2Fsps%2Foauth%2Fae%3Fresponse_type%3Dcode"
@@ -269,9 +248,6 @@ class dn_Auth:
             time.sleep(2)
             log("[+] Страница загружена")
 
-            # ============================================================
-            #  ШАГ 2: Логин
-            # ============================================================
             log("[i] Ввожу логин...")
             time.sleep(1.5)
             login_el = wait.until(EC.element_to_be_clickable((By.ID, "login")))
@@ -281,9 +257,6 @@ class dn_Auth:
             login_el.send_keys(username)
             log("[+] Логин введён")
 
-            # ============================================================
-            #  ШАГ 3: Пароль
-            # ============================================================
             log("[i] Ввожу пароль...")
             time.sleep(1.5)
             pass_el = wait.until(EC.element_to_be_clickable((By.ID, "password")))
@@ -293,9 +266,6 @@ class dn_Auth:
             pass_el.send_keys(password)
             log("[+] Пароль введён")
 
-            # ============================================================
-            #  ШАГ 4: Кнопка «Войти»
-            # ============================================================
             log("[i] Ищу кнопку 'Войти'...")
             time.sleep(1.5)
             submit = None
@@ -319,9 +289,6 @@ class dn_Auth:
             log("[+] Кнопка нажата")
             time.sleep(3)
 
-            # ============================================================
-            #  ШАГ 5: 2FA
-            # ============================================================
             if "methods2" in driver.current_url:
                 log("[+] Требуется 2FA")
 
@@ -361,9 +328,6 @@ class dn_Auth:
                         raise Exception("Таймаут ожидания ручного ввода SMS")
                     log("[+] Вход выполнен вручную")
 
-            # ============================================================
-            #  ШАГ 6: Ждём редирект на school.mos.ru
-            # ============================================================
             log("[i] Жду редирект на school.mos.ru...")
             end = time.time() + 60
             while time.time() < end:
@@ -373,9 +337,6 @@ class dn_Auth:
             log(f"[+] Текущий URL: {driver.current_url}")
             time.sleep(3)
 
-            # ============================================================
-            #  ШАГ 7: Открываем dnevnik.mos.ru
-            # ============================================================
             log("[i] Перехожу на dnevnik.mos.ru для получения cookies...")
             try:
                 driver.get("https://dnevnik.mos.ru/")
@@ -404,11 +365,7 @@ class dn_Auth:
             except Exception as e:
                 log(f"[!] Не удалось перейти: {e}")
 
-            # ============================================================
-            #  ШАГ 8: Сбор cookies + токенов из всех источников
-            # ============================================================
             log("[i] Собираю cookies и токены...")
-
             all_cookies = {}
 
             try:
@@ -465,9 +422,6 @@ class dn_Auth:
                 f"auth_token={'✅' if 'auth_token' in all_cookies else '❌'}, "
                 f"profile_id={profile_id or '❌'}")
 
-            # ============================================================
-            #  ШАГ 9: Если токен не найден — ждём пользователя до 3 мин
-            # ============================================================
             if "auth_token" not in all_cookies:
                 log("[!] auth_token не найден сразу.")
                 log("[i] Жду до 3 минут: откройте дневник в браузере (dnevnik.mos.ru/diary).")
@@ -501,9 +455,6 @@ class dn_Auth:
                         pass
                     time.sleep(2)
 
-            # ============================================================
-            #  ШАГ 10: Создаём requests.Session
-            # ============================================================
             if not all_cookies:
                 log("[!] Не удалось получить ни одной cookies")
                 return False
@@ -543,9 +494,6 @@ class dn_Auth:
             else:
                 log("[!] auth_token отсутствует — API вернёт 403")
 
-            # ============================================================
-            #  ШАГ 11: Проверяем API
-            # ============================================================
             log("[i] Проверяю авторизацию: GET core/api/schools")
             api_ok = False
             try:
@@ -560,7 +508,6 @@ class dn_Auth:
                     if data:
                         self.sid = data[0]["id"]
                         log(f"[+] Авторизация успешна! Школа: {data[0].get('name')}")
-
                         self.save_session()
                         log(f"[+] Сессия сохранена: {self.session_file}")
                         log(f"[+] Auth-данные сохранены: {self.auth_data_file}")
@@ -576,9 +523,6 @@ class dn_Auth:
             except Exception as e:
                 log(f"[!] Ошибка запроса к API: {e}")
 
-            # ============================================================
-            #  ШАГ 12: Передаём браузер в GUI
-            # ============================================================
             if gui_confirm_callback is not None:
                 keep_browser_open = True
                 try:
