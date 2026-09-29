@@ -9,11 +9,13 @@ from ui.check_tab import CheckTab
 from ui.notify_tab import NotifyTab
 from ui.console import EmittingStream
 from ui.check_results_tab_5_9 import CheckResultsTab5_9
+from ui.check_results_tab_5_9_online import CheckResultsTab5_9Online
 from ui.check_results_tab_10_11 import CheckResultsTab10_11
 from ui.missing_tab import MissingTab
 from ui.settings_tab import SettingsTab
 from ui.ktp_check_tab import KTPCheckTab
 from ui.ktp_check_tab_main import KTPMainCheckTab
+from ui.pdou_tab import PDOUTab
 
 
 class MainWindow(QMainWindow):
@@ -104,16 +106,20 @@ class MainWindow(QMainWindow):
         self.check_tab = CheckTab(self)
         self.notify_tab = NotifyTab(self)
         self.check_results_tab_5_9 = CheckResultsTab5_9(self)
+        self.check_results_tab_5_9_online = CheckResultsTab5_9Online(self)
         self.check_results_tab_10_11 = CheckResultsTab10_11(self)
         self.missing_tab = MissingTab(self)
         self.ktp_main_check_tab = KTPMainCheckTab(self)
         self.ktp_check_tab = KTPCheckTab(self)
+        self.pdou_tab = PDOUTab(self)
 
         tabs = [
             ("📥  Скачивание журналов", self.download_tab),
             ("🔍  Проверка журналов", self.check_tab),
             ("🎯  Проверка итогов (5-9)", self.check_results_tab_5_9),
+            ("🎯  Проверка итогов (5-9) Online", self.check_results_tab_5_9_online),  # ← НОВОЕ
             ("🎯  Проверка итогов (10-11)", self.check_results_tab_10_11),
+            ("🎨  Кружки ПДОУ", self.pdou_tab),  # ← НОВОЕ
             ("🔍  Проверка КТП (ОЧ+ФЧ)", self.ktp_main_check_tab),
             ("🔍  Проверка КТП (ВД)", self.ktp_check_tab),
             ("📊  Пропуски занятий", self.missing_tab),
@@ -136,10 +142,12 @@ class MainWindow(QMainWindow):
             self.check_tab,
             self.notify_tab,
             self.check_results_tab_5_9,
+            self.check_results_tab_5_9_online,  # ← НОВОЕ
             self.check_results_tab_10_11,
             self.missing_tab,
             self.ktp_main_check_tab,
             self.ktp_check_tab,
+            self.pdou_tab
         ]
 
         for tab in tabs_with_auth:
