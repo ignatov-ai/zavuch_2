@@ -2,16 +2,23 @@
 """
 Окно авторизации. Открывается при старте приложения.
 
-Две независимые колонки:
-  • Слева — ЭЖД (журналы): session.pkl + Selenium.
-  • Справа — ПДОУ (кружки): pdou_token.json (может быть от другого пользователя).
+Две симметричные колонки:
+  • Слева — ЭЖД (журналы): session.pkl + Selenium
+  • Справа — ПДОУ (кружки): pdou_token.json + pdou_cookies.json
+
+Каждая колонка поддерживает:
+  • Импорт из .zip-архива (сделанного на вкладке «Настройки»)
+  • Импорт отдельного файла сессии
+  • Selenium-авторизацию
+  • Очистку
 """
-import sys
 import json
 import pickle
 import shutil
+import sys
 import threading
 import time
+import zipfile
 from pathlib import Path
 
 import requests
@@ -31,13 +38,17 @@ from PySide6.QtWidgets import (
 DATA_DIR = Path.home() / ".zavuch2"
 DATA_DIR.mkdir(exist_ok=True)
 SESSION_FILE = DATA_DIR / "session.pkl"
-CREDENTIALS_FILE = DATA_DIR / "credentials.json"
 AUTH_DATA_FILE = DATA_DIR / "auth_data.json"
+CREDENTIALS_FILE = DATA_DIR / "credentials.json"
 PDOU_TOKEN_FILE = DATA_DIR / "pdou_token.json"
+PDOU_COOKIES_FILE = DATA_DIR / "pdou_cookies.json"
+
+EJD_FILES = ["session.pkl", "auth_data.json", "credentials.json"]
+PDOU_FILES = ["pdou_token.json", "pdou_cookies.json"]
 
 
 # ============================================================
-#  Утилиты для ЭЖД
+#  Утилиты
 # ============================================================
 def load_credentials() -> dict:
     if not CREDENTIALS_FILE.exists():
@@ -51,34 +62,15 @@ def load_credentials() -> dict:
 
 def save_credentials(login: str, password: str, totp_key: str = "") -> bool:
     try:
-        data = {"login": login, "password": password, "totp_key": totp_key or ""}
         with open(CREDENTIALS_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+            json.dump({"login": login, "password": password,
+                       "totp_key": totp_key or ""},
+                      f, ensure_ascii=False, indent=2)
         return True
     except Exception:
         return False
 
 
-def clear_credentials():
-    try:
-        if CREDENTIALS_FILE.exists():
-            CREDENTIALS_FILE.unlink()
-    except Exception:
-        pass
-
-
-def clear_session():
-    for f in (SESSION_FILE, AUTH_DATA_FILE):
-        try:
-            if f.exists():
-                f.unlink()
-        except Exception:
-            pass
-
-
-# ============================================================
-#  Утилиты для ПДОУ-токена
-# ============================================================
 def load_pdou_token() -> dict:
     if not PDOU_TOKEN_FILE.exists():
         return {}
@@ -89,36 +81,21 @@ def load_pdou_token() -> dict:
         return {}
 
 
-def save_pdou_token(token: str, user_name: str = "",
-                    user_roles=None) -> bool:
-    try:
-        data = {
-            "aupd_token": token.strip(),
-            "user_name": user_name.strip(),
-            "user_roles": list(user_roles or []),
-            "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-        }
-        with open(PDOU_TOKEN_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        return True
-    except Exception:
-        return False
-
-
-def clear_pdou_token():
-    try:
-        if PDOU_TOKEN_FILE.exists():
-            PDOU_TOKEN_FILE.unlink()
-    except Exception:
-        pass
+def format_file_info(fpath: Path) -> str:
+    """Возвращает строку '✅ имя — размер, дата' или '❌ имя'."""
+    if fpath.exists():
+        mtime = time.strftime("%d.%m.%Y %H:%M",
+                              time.localtime(fpath.stat().st_mtime))
+        size = fpath.stat().st_size
+        return f"✅ {fpath.name} ({size} Б, {mtime})"
+    return f"❌ {fpath.name}"
 
 
 # ============================================================
-#  Проверка сохранённой ЭЖД-сессии
+#  Проверка ЭЖД-сессии
 # ============================================================
 def check_saved_session() -> dict:
-    result = {"ok": False, "reason": "", "school": None,
-              "profile_id": None, "auth_obj": None}
+    result = {"ok": False, "reason": "", "auth_obj": None}
     if not SESSION_FILE.exists():
         result["reason"] = "session.pkl не найден"
         return result
@@ -127,8 +104,6 @@ def check_saved_session() -> dict:
         auth = dn_Auth()
         if auth.load_session():
             result["ok"] = True
-            result["school"] = f"school_id={auth.sid}"
-            result["profile_id"] = auth.pid
             result["auth_obj"] = auth
             result["reason"] = "сессия живая"
             return result
@@ -148,57 +123,8 @@ class SessionCheckWorker(QThread):
         self.done.emit(check_saved_session())
 
 
-class LoadCookiesWorker(QThread):
-    done = Signal(dict)
-    def run(self):
-        self.done.emit(check_saved_session())
-
-
-class ImportedSessionCheckWorker(QThread):
-    done = Signal(dict)
-    def __init__(self, source_path: str, copy_adjacent_auth_data: bool = True):
-        super().__init__()
-        self.source_path = source_path
-        self.copy_adjacent_auth_data = copy_adjacent_auth_data
-
-    def run(self):
-        result = {"ok": False, "reason": "", "auth_obj": None}
-        try:
-            src = Path(self.source_path)
-            if not src.exists():
-                result["reason"] = f"Файл не найден: {src}"
-                self.done.emit(result)
-                return
-            try:
-                DATA_DIR.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(str(src), str(SESSION_FILE))
-            except Exception as e:
-                result["reason"] = f"Не удалось скопировать: {e}"
-                self.done.emit(result)
-                return
-            if self.copy_adjacent_auth_data:
-                adjacent = src.parent / "auth_data.json"
-                if adjacent.exists():
-                    try:
-                        shutil.copy2(str(adjacent), str(AUTH_DATA_FILE))
-                    except Exception:
-                        pass
-            from auth import dn_Auth
-            auth = dn_Auth()
-            if auth.load_session():
-                result["ok"] = True
-                result["auth_obj"] = auth
-                result["reason"] = f"Сессия из {src.name} рабочая"
-            else:
-                result["reason"] = (
-                    "Файл скопирован, но API не принял сессию."
-                )
-        except Exception as e:
-            result["reason"] = f"Ошибка: {e}"
-        self.done.emit(result)
-
-
 class AuthWorker(QThread):
+    """Selenium-авторизация — для ЭЖД или ПДОУ."""
     log = Signal(str)
     finished_ok = Signal(object)
     finished_err = Signal(str)
@@ -273,26 +199,52 @@ class AuthWorker(QThread):
             self.finished_err.emit(str(e))
 
 
-# ============================================================
-#  Поток проверки ПДОУ-токена  —  4 значения!
-# ============================================================
-class PDOUTokenCheckThread(QThread):
-    finished = Signal(bool, str, list, str)   # (ok, user_name, roles, reason)
-    log = Signal(str)
+class ZipImportWorker(QThread):
+    """
+    Импорт сессий из .zip.
+    Возвращает dict: {"ok": bool, "restored": [...], "reason": str,
+                      "ejud": bool, "pdou": bool}
+    """
+    done = Signal(dict)
 
-    def __init__(self, token):
+    def __init__(self, zip_path: str, import_ejd: bool, import_pdou: bool):
         super().__init__()
-        self.token = token
+        self.zip_path = zip_path
+        self.import_ejd = import_ejd
+        self.import_pdou = import_pdou
 
     def run(self):
+        result = {"ok": False, "restored": [], "reason": "",
+                  "ejud": False, "pdou": False}
         try:
-            from collector_pdou import PDOUCollector
-            collector = PDOUCollector(self.token)
-            collector.log_callback = lambda t: self.log.emit(t)
-            ok, user_name, roles, reason = collector.check_token()   # ← 4 значения
-            self.finished.emit(ok, user_name, roles, reason)
+            with zipfile.ZipFile(self.zip_path, "r") as zf:
+                names = zf.namelist()
+
+                has_ejd = any(n in EJD_FILES for n in names)
+                has_pdou = any(n in PDOU_FILES for n in names)
+                result["ejud"] = has_ejd
+                result["pdou"] = has_pdou
+
+                to_restore = []
+                if self.import_ejd:
+                    to_restore.extend(EJD_FILES)
+                if self.import_pdou:
+                    to_restore.extend(PDOU_FILES)
+
+                for fname in to_restore:
+                    if fname in names:
+                        target = DATA_DIR / fname
+                        with zf.open(fname) as src, open(target, "wb") as dst:
+                            shutil.copyfileobj(src, dst)
+                        result["restored"].append(fname)
+
+            result["ok"] = bool(result["restored"])
+            if not result["ok"]:
+                result["reason"] = "В архиве не найдено нужных файлов."
         except Exception as e:
-            self.finished.emit(False, "", [], f"Исключение: {e}")
+            result["reason"] = f"Ошибка: {e}"
+
+        self.done.emit(result)
 
 
 # ============================================================
@@ -302,28 +254,21 @@ class AuthWindow(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("ЭЖД МЭШ — Вход")
-        self.setMinimumSize(1200, 900)
+        self.setMinimumSize(1100, 780)
 
         self.auth = None
         self.check_worker = None
-        self.load_cookies_worker = None
-        self.import_worker = None
-        self.auth_worker = None
-        self.pdou_check_worker = None
+        self.ejd_auth_worker = None
+        self.pdou_auth_worker = None
+        self.zip_worker = None
         self.main_window = None
-
-        self.pdou_user_name = ""
-        self.pdou_roles = []
 
         self._build_ui()
         self._load_saved_credentials()
-        self._load_saved_pdou_token()
+        self._refresh_statuses()
         self._start_session_check()
-        self._start_pdou_auto_check()
 
-    # ==================================================================
-    #  UI
-    # ==================================================================
+    # ------------------------------------------------------------------
     def _build_ui(self):
         self.stack = QStackedWidget()
         self.stack.addWidget(self._build_checking_screen())
@@ -334,6 +279,7 @@ class AuthWindow(QWidget):
         layout.addWidget(self.stack)
         self.setLayout(layout)
 
+    # ------------------------------------------------------------------
     def _build_checking_screen(self) -> QWidget:
         w = QWidget()
         layout = QVBoxLayout(w)
@@ -351,6 +297,7 @@ class AuthWindow(QWidget):
         layout.addStretch()
         return w
 
+    # ------------------------------------------------------------------
     def _build_login_screen(self) -> QWidget:
         w = QWidget()
         main_layout = QVBoxLayout(w)
@@ -362,39 +309,47 @@ class AuthWindow(QWidget):
         title.setStyleSheet("font-size: 20px; font-weight: bold; margin: 4px;")
         main_layout.addWidget(title)
 
+        # === ДВЕ СИММЕТРИЧНЫЕ КОЛОНКИ ===
         columns = QHBoxLayout()
         columns.setSpacing(15)
         columns.addWidget(self._build_ejd_column(), 1)
         columns.addWidget(self._build_pdou_column(), 1)
         main_layout.addLayout(columns, 1)
 
-        # Служебные кнопки
+        # === СЛУЖЕБНЫЕ КНОПКИ (общие) ===
         service_row = QHBoxLayout()
         service_row.setSpacing(8)
         service_row.addStretch()
 
-        self.monitor_btn = QPushButton("👁 Монитор сессии")
-        self.monitor_btn.setMinimumHeight(30)
-        self.monitor_btn.setMaximumWidth(180)
-        self.monitor_btn.clicked.connect(self.on_start_monitor)
-        service_row.addWidget(self.monitor_btn)
+        self.zip_import_btn = QPushButton("📥 Импорт сессий из архива (.zip)")
+        self.zip_import_btn.setMinimumHeight(32)
+        self.zip_import_btn.setStyleSheet("""
+            QPushButton { background-color: #059669; color: white;
+                font-weight: bold; border-radius: 6px; padding: 0 16px; }
+            QPushButton:hover { background-color: #047857; }
+        """)
+        self.zip_import_btn.clicked.connect(self.on_zip_import)
+        service_row.addWidget(self.zip_import_btn)
 
-        self.import_tokens_btn = QPushButton("📋 Импорт токенов (ЭЖД)")
-        self.import_tokens_btn.setMinimumHeight(30)
-        self.import_tokens_btn.setMaximumWidth(200)
-        self.import_tokens_btn.clicked.connect(self.on_open_token_dialog)
-        service_row.addWidget(self.import_tokens_btn)
+        self.refresh_btn = QPushButton("🔄 Обновить статусы")
+        self.refresh_btn.setMinimumHeight(32)
+        self.refresh_btn.clicked.connect(self._refresh_statuses)
+        service_row.addWidget(self.refresh_btn)
 
         self.clear_all_btn = QPushButton("🗑 Очистить все данные")
-        self.clear_all_btn.setMinimumHeight(30)
-        self.clear_all_btn.setMaximumWidth(200)
+        self.clear_all_btn.setMinimumHeight(32)
+        self.clear_all_btn.setStyleSheet("""
+            QPushButton { background-color: #dc2626; color: white;
+                font-weight: bold; border-radius: 6px; padding: 0 16px; }
+            QPushButton:hover { background-color: #b91c1c; }
+        """)
         self.clear_all_btn.clicked.connect(self.on_clear_all)
         service_row.addWidget(self.clear_all_btn)
 
         service_row.addStretch()
         main_layout.addLayout(service_row)
 
-        # Журнал
+        # === ОБЩИЙ ЖУРНАЛ ===
         log_group = QGroupBox("📋 Журнал")
         log_group.setStyleSheet("""
             QGroupBox { font-weight: bold; font-size: 11pt;
@@ -413,20 +368,24 @@ class AuthWindow(QWidget):
             "font-family: Consolas, monospace; font-size: 10px;"
             "background-color: #1e1e1e; color: #d4d4d4;"
         )
-        self.log_view.setMinimumHeight(140)
+        self.log_view.setMinimumHeight(120)
+        self.log_view.setMaximumHeight(180)
         log_layout.addWidget(self.log_view)
 
         main_layout.addWidget(log_group)
 
         return w
 
+    # ------------------------------------------------------------------
+    #  Левая колонка — ЭЖД
+    # ------------------------------------------------------------------
     def _build_ejd_column(self) -> QWidget:
-        group = QGroupBox("🔐 ЭЖД — журналы и итоги")
+        group = QGroupBox("🔐  ЭЖД — журналы и итоги")
         group.setStyleSheet("""
             QGroupBox {
-                font-weight: bold; font-size: 12pt;
+                font-weight: bold; font-size: 13pt;
                 border: 2px solid #2563eb; border-radius: 10px;
-                margin-top: 1ex; padding-top: 15px;
+                margin-top: 1ex; padding-top: 18px;
                 background-color: #ffffff;
             }
             QGroupBox::title {
@@ -436,75 +395,70 @@ class AuthWindow(QWidget):
         """)
         col = QVBoxLayout(group)
         col.setSpacing(8)
-        col.setContentsMargins(12, 18, 12, 12)
+        col.setContentsMargins(14, 18, 14, 14)
 
-        self.ejd_status_label = QLabel("⏳ Проверяю сохранённую сессию...")
+        # === Статус ===
+        self.ejd_status_label = QLabel("⏳ Проверяю...")
         self.ejd_status_label.setWordWrap(True)
-        self.ejd_status_label.setStyleSheet(
-            "color: #666; font-weight: bold; padding: 4px;"
-        )
+        self.ejd_status_label.setStyleSheet("""
+            color: #1e3a8a; font-weight: bold; font-size: 10pt;
+            background-color: #eff6ff; padding: 8px;
+            border-radius: 6px;
+        """)
         col.addWidget(self.ejd_status_label)
 
-        self.load_cookies_btn = QPushButton("📂 Использовать session.pkl")
-        self.load_cookies_btn.setMinimumHeight(34)
-        self.load_cookies_btn.setStyleSheet("""
-            QPushButton { background-color: #059669; color: white;
-                font-size: 10pt; font-weight: bold; border-radius: 6px; }
-            QPushButton:hover { background-color: #047857; }
-            QPushButton:disabled { background-color: #cccccc; color: #666; }
-        """)
-        self.load_cookies_btn.clicked.connect(self.on_login_with_cookies)
-        col.addWidget(self.load_cookies_btn)
+        # === Список файлов сессии ===
+        self.ejd_files_label = QLabel()
+        self.ejd_files_label.setWordWrap(True)
+        self.ejd_files_label.setStyleSheet(
+            "font-family: Consolas, monospace; font-size: 8pt; color: #475569;"
+        )
+        col.addWidget(self.ejd_files_label)
 
-        import_row = QHBoxLayout()
-        import_row.setSpacing(4)
-        self.session_path_edit = QLineEdit()
-        self.session_path_edit.setPlaceholderText("Путь к session.pkl")
-        self.session_path_edit.setMinimumHeight(30)
-        self.session_path_edit.textChanged.connect(self._update_use_file_btn)
-        import_row.addWidget(self.session_path_edit, 1)
+        # === Разделитель ===
+        col.addWidget(self._make_sep())
 
-        self.browse_session_btn = QPushButton("…")
-        self.browse_session_btn.setMaximumWidth(34)
-        self.browse_session_btn.setMinimumHeight(30)
-        self.browse_session_btn.clicked.connect(self.on_browse_session_file)
-        import_row.addWidget(self.browse_session_btn)
-        col.addLayout(import_row)
+        # === Импорт ===
+        col.addWidget(QLabel("<b>1. Подгрузить сессию:</b>"))
 
-        self.use_session_file_btn = QPushButton("✅ Использовать выбранный файл")
-        self.use_session_file_btn.setMinimumHeight(32)
-        self.use_session_file_btn.setEnabled(False)
-        self.use_session_file_btn.setStyleSheet("""
-            QPushButton { background-color: #6b7280; color: white;
-                font-size: 10pt; font-weight: bold; border-radius: 6px; }
-            QPushButton:hover { background-color: #4b5563; }
-            QPushButton:disabled { background-color: #cccccc; color: #888; }
-        """)
-        self.use_session_file_btn.clicked.connect(self.on_use_selected_file)
-        col.addWidget(self.use_session_file_btn)
+        row1 = QHBoxLayout()
+        row1.setSpacing(4)
 
-        sep = QFrame()
-        sep.setFrameShape(QFrame.HLine)
-        sep.setStyleSheet("color: #dddddd;")
-        col.addWidget(sep)
+        self.ejd_load_pkl_btn = QPushButton("📁 Файл session.pkl")
+        self.ejd_load_pkl_btn.setMinimumHeight(30)
+        self.ejd_load_pkl_btn.clicked.connect(self.on_load_ejd_pkl)
+        row1.addWidget(self.ejd_load_pkl_btn)
+
+        self.ejd_load_zip_btn = QPushButton("📦 Архив .zip")
+        self.ejd_load_zip_btn.setMinimumHeight(30)
+        self.ejd_load_zip_btn.clicked.connect(lambda: self.on_zip_import("ejd"))
+        row1.addWidget(self.ejd_load_zip_btn)
+
+        col.addLayout(row1)
+
+        # === Разделитель ===
+        col.addWidget(self._make_sep())
+
+        # === Selenium-авторизация ===
+        col.addWidget(QLabel("<b>2. Или войти через браузер:</b>"))
 
         col.addWidget(QLabel("Логин:"))
         self.ejd_login_edit = QLineEdit()
         self.ejd_login_edit.setPlaceholderText("Телефон / email / СНИЛС")
-        self.ejd_login_edit.setMinimumHeight(30)
+        self.ejd_login_edit.setMinimumHeight(32)
         col.addWidget(self.ejd_login_edit)
 
         col.addWidget(QLabel("Пароль:"))
         self.ejd_password_edit = QLineEdit()
         self.ejd_password_edit.setPlaceholderText("Пароль")
         self.ejd_password_edit.setEchoMode(QLineEdit.Password)
-        self.ejd_password_edit.setMinimumHeight(30)
+        self.ejd_password_edit.setMinimumHeight(32)
         col.addWidget(self.ejd_password_edit)
 
-        col.addWidget(QLabel("TOTP (если есть):"))
+        col.addWidget(QLabel("TOTP-ключ (если есть):"))
         self.ejd_totp_edit = QLineEdit()
         self.ejd_totp_edit.setPlaceholderText("Base32, можно пусто")
-        self.ejd_totp_edit.setMinimumHeight(30)
+        self.ejd_totp_edit.setMinimumHeight(32)
         col.addWidget(self.ejd_totp_edit)
 
         self.ejd_show_pass_cb = QCheckBox("Показывать пароль")
@@ -513,39 +467,50 @@ class AuthWindow(QWidget):
         )
         self.ejd_remember_cb = QCheckBox("Запомнить логин/пароль")
         self.ejd_remember_cb.setChecked(True)
+
         cb_row = QHBoxLayout()
         cb_row.addWidget(self.ejd_show_pass_cb)
         cb_row.addWidget(self.ejd_remember_cb)
         cb_row.addStretch()
         col.addLayout(cb_row)
 
+        # === Кнопки входа ===
         self.ejd_login_btn = QPushButton("🌐 Войти в ЭЖД через браузер")
-        self.ejd_login_btn.setMinimumHeight(38)
+        self.ejd_login_btn.setMinimumHeight(40)
         self.ejd_login_btn.setStyleSheet("""
             QPushButton { background-color: #2563eb; color: white;
                 font-size: 11pt; font-weight: bold; border-radius: 6px; }
             QPushButton:hover { background-color: #1d4ed8; }
             QPushButton:disabled { background-color: #cccccc; color: #666; }
         """)
-        self.ejd_login_btn.clicked.connect(self.on_login_with_browser)
+        self.ejd_login_btn.clicked.connect(self.on_login_ejd)
         col.addWidget(self.ejd_login_btn)
 
         col.addStretch()
 
-        path_hint = QLabel(f"📁 {DATA_DIR / 'session.pkl'}")
-        path_hint.setStyleSheet("color: #999; font-size: 8pt;")
-        path_hint.setWordWrap(True)
-        col.addWidget(path_hint)
+        # === Очистка ===
+        self.ejd_clear_btn = QPushButton("🗑 Очистить ЭЖД-сессию")
+        self.ejd_clear_btn.setMinimumHeight(26)
+        self.ejd_clear_btn.setStyleSheet("""
+            QPushButton { background-color: #fee2e2; color: #b91c1c;
+                font-weight: bold; border-radius: 6px; }
+            QPushButton:hover { background-color: #fecaca; }
+        """)
+        self.ejd_clear_btn.clicked.connect(self.on_clear_ejd)
+        col.addWidget(self.ejd_clear_btn)
 
         return group
 
+    # ------------------------------------------------------------------
+    #  Правая колонка — ПДОУ
+    # ------------------------------------------------------------------
     def _build_pdou_column(self) -> QWidget:
-        group = QGroupBox("🎨 ПДОУ — кружки и секции")
+        group = QGroupBox("🎨  ПДОУ — кружки и секции")
         group.setStyleSheet("""
             QGroupBox {
-                font-weight: bold; font-size: 12pt;
+                font-weight: bold; font-size: 13pt;
                 border: 2px solid #8b5cf6; border-radius: 10px;
-                margin-top: 1ex; padding-top: 15px;
+                margin-top: 1ex; padding-top: 18px;
                 background-color: #ffffff;
             }
             QGroupBox::title {
@@ -555,86 +520,70 @@ class AuthWindow(QWidget):
         """)
         col = QVBoxLayout(group)
         col.setSpacing(8)
-        col.setContentsMargins(12, 18, 12, 12)
+        col.setContentsMargins(14, 18, 14, 14)
 
-        self.pdou_status_label = QLabel("⏳ Токен не задан")
+        # === Статус ===
+        self.pdou_status_label = QLabel("⏳ Проверяю...")
         self.pdou_status_label.setWordWrap(True)
-        self.pdou_status_label.setStyleSheet(
-            "color: #666; font-weight: bold; padding: 4px;"
-        )
+        self.pdou_status_label.setStyleSheet("""
+            color: #5b21b6; font-weight: bold; font-size: 10pt;
+            background-color: #f5f3ff; padding: 8px;
+            border-radius: 6px;
+        """)
         col.addWidget(self.pdou_status_label)
 
-        col.addWidget(QLabel("Токен ПДОУ (aupdToken):"))
-        self.pdou_token_edit = QLineEdit()
-        self.pdou_token_edit.setPlaceholderText("JWT от school.mos.ru")
-        self.pdou_token_edit.setMinimumHeight(30)
-        col.addWidget(self.pdou_token_edit)
+        # === Список файлов ===
+        self.pdou_files_label = QLabel()
+        self.pdou_files_label.setWordWrap(True)
+        self.pdou_files_label.setStyleSheet(
+            "font-family: Consolas, monospace; font-size: 8pt; color: #475569;"
+        )
+        col.addWidget(self.pdou_files_label)
 
-        token_btn_row = QHBoxLayout()
-        token_btn_row.setSpacing(4)
+        # === Разделитель ===
+        col.addWidget(self._make_sep())
 
-        self.pdou_paste_btn = QPushButton("📋 Из буфера")
-        self.pdou_paste_btn.setMinimumHeight(30)
-        self.pdou_paste_btn.clicked.connect(self.on_pdou_paste)
-        token_btn_row.addWidget(self.pdou_paste_btn)
+        # === Импорт ===
+        col.addWidget(QLabel("<b>1. Подгрузить сессию:</b>"))
 
-        self.pdou_check_btn = QPushButton("🔍 Проверить")
-        self.pdou_check_btn.setMinimumHeight(30)
-        self.pdou_check_btn.clicked.connect(self.on_pdou_check)
-        token_btn_row.addWidget(self.pdou_check_btn)
+        row1 = QHBoxLayout()
+        row1.setSpacing(4)
 
-        self.pdou_save_btn = QPushButton("💾 Сохранить")
-        self.pdou_save_btn.setMinimumHeight(30)
-        self.pdou_save_btn.setStyleSheet("""
-            QPushButton { background-color: #059669; color: white;
-                font-weight: bold; border-radius: 6px; }
-            QPushButton:hover { background-color: #047857; }
-            QPushButton:disabled { background-color: #cccccc; color: #666; }
-        """)
-        self.pdou_save_btn.clicked.connect(self.on_pdou_save)
-        token_btn_row.addWidget(self.pdou_save_btn)
+        self.pdou_load_json_btn = QPushButton("📁 Файл pdou_token.json")
+        self.pdou_load_json_btn.setMinimumHeight(30)
+        self.pdou_load_json_btn.clicked.connect(self.on_load_pdou_json)
+        row1.addWidget(self.pdou_load_json_btn)
 
-        col.addLayout(token_btn_row)
+        self.pdou_load_zip_btn = QPushButton("📦 Архив .zip")
+        self.pdou_load_zip_btn.setMinimumHeight(30)
+        self.pdou_load_zip_btn.clicked.connect(lambda: self.on_zip_import("pdou"))
+        row1.addWidget(self.pdou_load_zip_btn)
 
-        self.pdou_from_ejd_btn = QPushButton("📥 Взять токен из ЭЖД-сессии")
-        self.pdou_from_ejd_btn.setMinimumHeight(30)
-        self.pdou_from_ejd_btn.clicked.connect(self.on_pdou_from_ejd)
-        col.addWidget(self.pdou_from_ejd_btn)
+        col.addLayout(row1)
 
-        self.pdou_clear_btn = QPushButton("🗑 Очистить токен ПДОУ")
-        self.pdou_clear_btn.setMinimumHeight(28)
-        self.pdou_clear_btn.setStyleSheet("""
-            QPushButton { background-color: #dc2626; color: white;
-                font-weight: bold; border-radius: 6px; }
-            QPushButton:hover { background-color: #b91c1c; }
-        """)
-        self.pdou_clear_btn.clicked.connect(self.on_pdou_clear)
-        col.addWidget(self.pdou_clear_btn)
+        # === Разделитель ===
+        col.addWidget(self._make_sep())
 
-        sep = QFrame()
-        sep.setFrameShape(QFrame.HLine)
-        sep.setStyleSheet("color: #dddddd;")
-        col.addWidget(sep)
+        # === Selenium-авторизация ===
+        col.addWidget(QLabel("<b>2. Или войти через браузер:</b>"))
 
-        col.addWidget(QLabel("Или войти через браузер:"))
         col.addWidget(QLabel("Логин:"))
-
         self.pdou_login_edit = QLineEdit()
         self.pdou_login_edit.setPlaceholderText("Логин учётки с доступом к ПДОУ")
-        self.pdou_login_edit.setMinimumHeight(30)
+        self.pdou_login_edit.setMinimumHeight(32)
         col.addWidget(self.pdou_login_edit)
 
         col.addWidget(QLabel("Пароль:"))
         self.pdou_password_edit = QLineEdit()
         self.pdou_password_edit.setPlaceholderText("Пароль")
         self.pdou_password_edit.setEchoMode(QLineEdit.Password)
-        self.pdou_password_edit.setMinimumHeight(30)
+        self.pdou_password_edit.setMinimumHeight(32)
         col.addWidget(self.pdou_password_edit)
 
-        col.addWidget(QLabel("TOTP (если есть):"))
+        col.addWidget(QLabel("TOTP-ключ (если есть):"))
         self.pdou_totp_edit = QLineEdit()
         self.pdou_totp_edit.setPlaceholderText("Base32, можно пусто")
-        self.pdou_totp_edit.setMinimumHeight(30)
+        self.pdou_totp_edit.setMinimumHeight(32)
         col.addWidget(self.pdou_totp_edit)
 
         self.pdou_show_pass_cb = QCheckBox("Показывать пароль")
@@ -643,25 +592,39 @@ class AuthWindow(QWidget):
         )
         col.addWidget(self.pdou_show_pass_cb)
 
+        # === Кнопки входа ===
         self.pdou_login_btn = QPushButton("🎨 Войти как ПДОУ через браузер")
-        self.pdou_login_btn.setMinimumHeight(38)
+        self.pdou_login_btn.setMinimumHeight(40)
         self.pdou_login_btn.setStyleSheet("""
             QPushButton { background-color: #8b5cf6; color: white;
                 font-size: 11pt; font-weight: bold; border-radius: 6px; }
             QPushButton:hover { background-color: #7c3aed; }
             QPushButton:disabled { background-color: #cccccc; color: #666; }
         """)
-        self.pdou_login_btn.clicked.connect(self.on_login_as_pdou)
+        self.pdou_login_btn.clicked.connect(self.on_login_pdou)
         col.addWidget(self.pdou_login_btn)
 
         col.addStretch()
 
-        path_hint = QLabel(f"📁 {PDOU_TOKEN_FILE}")
-        path_hint.setStyleSheet("color: #999; font-size: 8pt;")
-        path_hint.setWordWrap(True)
-        col.addWidget(path_hint)
+        # === Очистка ===
+        self.pdou_clear_btn = QPushButton("🗑 Очистить ПДОУ-сессию")
+        self.pdou_clear_btn.setMinimumHeight(26)
+        self.pdou_clear_btn.setStyleSheet("""
+            QPushButton { background-color: #f3e8ff; color: #6b21a8;
+                font-weight: bold; border-radius: 6px; }
+            QPushButton:hover { background-color: #e9d5ff; }
+        """)
+        self.pdou_clear_btn.clicked.connect(self.on_clear_pdou)
+        col.addWidget(self.pdou_clear_btn)
 
         return group
+
+    # ------------------------------------------------------------------
+    def _make_sep(self) -> QFrame:
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet("color: #e2e8f0; margin: 4px 0;")
+        return sep
 
     def _toggle_echo(self, line_edit: QLineEdit, state):
         if state == Qt.CheckState.Checked.value:
@@ -677,28 +640,32 @@ class AuthWindow(QWidget):
         self.ejd_password_edit.setText(creds.get("password", ""))
         self.ejd_totp_edit.setText(creds.get("totp_key", ""))
 
-    def _load_saved_pdou_token(self):
-        data = load_pdou_token()
-        token = data.get("aupd_token", "")
-        user_name = data.get("user_name", "")
-        roles = data.get("user_roles", [])
-        if token:
-            self.pdou_token_edit.setText(token)
-            self.pdou_user_name = user_name
-            self.pdou_roles = roles
-            self._update_pdou_status(True, user_name, roles)
-
     def append_log(self, msg: str):
         self.log_view.appendPlainText(msg)
         sb = self.log_view.verticalScrollBar()
         sb.setValue(sb.maximum())
 
     # ==================================================================
-    #  СТАРТОВАЯ ПРОВЕРКА
+    #  СТАТУСЫ
+    # ==================================================================
+    def _refresh_statuses(self):
+        # ЭЖД
+        lines = []
+        for fname in EJD_FILES:
+            lines.append(format_file_info(DATA_DIR / fname))
+        self.ejd_files_label.setText("\n".join(lines))
+
+        # ПДОУ
+        lines = []
+        for fname in PDOU_FILES:
+            lines.append(format_file_info(DATA_DIR / fname))
+        self.pdou_files_label.setText("\n".join(lines))
+
+    # ==================================================================
+    #  АВТОПРОВЕРКА ЭЖД-СЕССИИ
     # ==================================================================
     def _start_session_check(self):
         self.checking_label.setText("Проверяю сохранённую сессию...")
-        self.checking_label.setStyleSheet("color: #666; padding: 8px;")
         self.check_worker = SessionCheckWorker()
         self.check_worker.done.connect(self._on_session_checked)
         self.check_worker.start()
@@ -706,8 +673,7 @@ class AuthWindow(QWidget):
     def _on_session_checked(self, result: dict):
         if result.get("ok"):
             self.checking_label.setText(
-                f"✅ Найдена живая сессия ЭЖД ({result.get('reason')})\n"
-                "Открываю главное окно..."
+                "✅ Найдена живая сессия ЭЖД.\nОткрываю главное окно..."
             )
             self.checking_label.setStyleSheet(
                 "color: green; font-weight: bold; padding: 8px;"
@@ -715,19 +681,12 @@ class AuthWindow(QWidget):
             self.auth = result.get("auth_obj")
             QTimer.singleShot(700, self._open_main_window)
         else:
-            reason = result.get("reason", "неизвестная причина")
-            self._show_login_form(f"Сессия ЭЖД не найдена ({reason})")
-
-    def _start_pdou_auto_check(self):
-        data = load_pdou_token()
-        token = data.get("aupd_token", "")
-        if token:
-            self._run_pdou_check(token, silent=True)
-
-    def _show_login_form(self, message: str = ""):
-        self.checking_label.setText(f"{message}\nПереход к форме входа...")
-        self.checking_label.setStyleSheet("color: #666; padding: 8px;")
-        QTimer.singleShot(500, lambda: self.stack.setCurrentIndex(1))
+            reason = result.get("reason", "неизвестно")
+            self.checking_label.setText(
+                f"Сессия ЭЖД не найдена ({reason}).\nПереход к форме входа..."
+            )
+            self.checking_label.setStyleSheet("color: #666; padding: 8px;")
+            QTimer.singleShot(500, lambda: self.stack.setCurrentIndex(1))
 
     def _open_main_window(self):
         from ui.main_window import MainWindow
@@ -738,68 +697,231 @@ class AuthWindow(QWidget):
         self.close()
 
     # ==================================================================
-    #  ЭЖД — кнопки
+    #  ИМПОРТ ИЗ ZIP
     # ==================================================================
-    def on_login_with_cookies(self):
-        if not SESSION_FILE.exists():
-            QMessageBox.warning(self, "Нет данных",
-                                f"Файл не найден:\n{SESSION_FILE}")
+    def on_zip_import(self, mode: str = None):
+        """
+        mode: None / "ejd" / "pdou"
+          • None  — спросить оба флага чекбоксами в диалоге ниже
+          • "ejd" — только ЭЖД
+          • "pdou" — только ПДОУ
+        """
+        zip_path, _ = QFileDialog.getOpenFileName(
+            self, "Выберите архив .zip с сессиями", str(Path.home()),
+            "ZIP archives (*.zip);;Все файлы (*.*)"
+        )
+        if not zip_path:
             return
-        self.append_log("[i] Проверяю сохранённые cookies ЭЖД...")
-        self._set_ejd_ui_enabled(False)
-        self.load_cookies_worker = LoadCookiesWorker()
-        self.load_cookies_worker.done.connect(self._on_cookies_loaded)
-        self.load_cookies_worker.start()
 
-    def _on_cookies_loaded(self, result: dict):
-        self._set_ejd_ui_enabled(True)
-        if result.get("ok"):
-            self.auth = result.get("auth_obj")
-            QTimer.singleShot(300, self._open_main_window)
+        # Проверим, что внутри
+        try:
+            with zipfile.ZipFile(zip_path, "r") as zf:
+                names = zf.namelist()
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка",
+                                 f"Не удалось открыть архив:\n{e}")
+            return
+
+        has_ejd = any(n in EJD_FILES for n in names)
+        has_pdou = any(n in PDOU_FILES for n in names)
+
+        if not has_ejd and not has_pdou:
+            QMessageBox.warning(
+                self, "Нет данных",
+                "В архиве не найдено файлов сессий zavuch 2."
+            )
+            return
+
+        # Если mode задан — импортируем только его
+        if mode == "ejd":
+            if not has_ejd:
+                QMessageBox.warning(self, "Ошибка",
+                                    "В архиве нет файлов ЭЖД-сессии.")
+                return
+            import_ejd, import_pdou = True, False
+        elif mode == "pdou":
+            if not has_pdou:
+                QMessageBox.warning(self, "Ошибка",
+                                    "В архиве нет файлов ПДОУ-сессии.")
+                return
+            import_ejd, import_pdou = False, True
         else:
-            QMessageBox.warning(self, "Cookies не подошли",
-                                result.get("reason", ""))
+            # Спросим, что восстанавливать
+            import_ejd, import_pdou = self._ask_import_choice(
+                has_ejd, has_pdou
+            )
+            if not import_ejd and not import_pdou:
+                return
 
-    def on_browse_session_file(self):
-        file_path, _ = QFileDialog.getOpenFileName(
+        # Подтверждение перезаписи
+        reply = QMessageBox.question(
+            self, "Подтверждение",
+            "Существующие файлы сессий будут перезаписаны.\nПродолжить?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        # Запуск импорта в потоке
+        self.zip_worker = ZipImportWorker(zip_path, import_ejd, import_pdou)
+        self.zip_worker.done.connect(self._on_zip_import_finished)
+        self.zip_worker.start()
+
+    def _ask_import_choice(self, has_ejd: bool, has_pdou: bool):
+        """Спрашивает чекбоксами, что восстанавливать."""
+        from PySide6.QtWidgets import QDialog, QDialogButtonBox
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Импорт сессий")
+        dlg.setMinimumWidth(400)
+
+        layout = QVBoxLayout(dlg)
+        layout.addWidget(QLabel("Что восстановить из архива?"))
+
+        ejd_cb = QCheckBox("🔐 ЭЖД-сессия")
+        ejd_cb.setChecked(has_ejd)
+        ejd_cb.setEnabled(has_ejd)
+        if not has_ejd:
+            ejd_cb.setText("🔐 ЭЖД-сессия (нет в архиве)")
+        layout.addWidget(ejd_cb)
+
+        pdou_cb = QCheckBox("🎨 ПДОУ-сессия")
+        pdou_cb.setChecked(has_pdou)
+        pdou_cb.setEnabled(has_pdou)
+        if not has_pdou:
+            pdou_cb.setText("🎨 ПДОУ-сессия (нет в архиве)")
+        layout.addWidget(pdou_cb)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok |
+            QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        layout.addWidget(buttons)
+
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return False, False
+        return ejd_cb.isChecked(), pdou_cb.isChecked()
+
+    def _on_zip_import_finished(self, result: dict):
+        self._refresh_statuses()
+
+        if result.get("ok"):
+            restored = "\n".join(f"• {f}" for f in result.get("restored", []))
+            QMessageBox.information(
+                self, "Импорт завершён",
+                f"✅ Восстановлено файлов: {len(result['restored'])}\n\n"
+                f"{restored}\n\n"
+                "Рекомендуется перезапустить приложение для применения сессий."
+            )
+            self.append_log(f"[+] Импорт: {restored}")
+
+            # Если импортировали ЭЖД — попробуем сразу зайти
+            if result.get("ejud") or "session.pkl" in result.get("restored", []):
+                self.append_log("[i] Проверяю ЭЖД-сессию...")
+                self._start_session_check()
+        else:
+            QMessageBox.warning(
+                self, "Импорт не удался",
+                result.get("reason", "Неизвестная ошибка")
+            )
+
+    # ==================================================================
+    #  ИМПОРТ ОТДЕЛЬНЫХ ФАЙЛОВ
+    # ==================================================================
+    def on_load_ejd_pkl(self):
+        """Импорт session.pkl + auth_data.json."""
+        # Сначала session.pkl
+        pkl_path, _ = QFileDialog.getOpenFileName(
             self, "Выберите session.pkl", str(Path.home()),
             "Pickle session files (*.pkl);;Все файлы (*.*)"
         )
-        if file_path:
-            self.session_path_edit.setText(file_path)
-
-    def _update_use_file_btn(self, text: str):
-        self.use_session_file_btn.setEnabled(bool((text or "").strip()))
-
-    def on_use_selected_file(self):
-        file_path = self.session_path_edit.text().strip()
-        if not file_path:
-            QMessageBox.warning(self, "Ошибка", "Выберите файл.")
+        if not pkl_path:
             return
-        if not Path(file_path).exists():
-            QMessageBox.warning(self, "Ошибка", f"Файл не найден:\n{file_path}")
+
+        try:
+            shutil.copy2(pkl_path, SESSION_FILE)
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка",
+                                 f"Не удалось скопировать session.pkl:\n{e}")
             return
-        self._set_ejd_ui_enabled(False)
-        self.import_worker = ImportedSessionCheckWorker(file_path)
-        self.import_worker.done.connect(self._on_import_finished)
-        self.import_worker.start()
 
-    def _on_import_finished(self, result: dict):
-        self._set_ejd_ui_enabled(True)
-        if result.get("ok"):
-            self.auth = result.get("auth_obj")
-            QTimer.singleShot(300, self._open_main_window)
-        else:
-            QMessageBox.warning(self, "Сессия не подошла",
-                                result.get("reason", ""))
+        # Спросим про auth_data.json (если лежит рядом)
+        adjacent = Path(pkl_path).parent / "auth_data.json"
+        if adjacent.exists():
+            reply = QMessageBox.question(
+                self, "Импорт auth_data.json",
+                f"Рядом найден auth_data.json:\n{adjacent}\n\n"
+                "Скопировать его тоже?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                try:
+                    shutil.copy2(adjacent, AUTH_DATA_FILE)
+                except Exception as e:
+                    QMessageBox.warning(self, "Ошибка",
+                                        f"auth_data.json: {e}")
 
-    def on_login_with_browser(self):
+        self._refresh_statuses()
+        QMessageBox.information(
+            self, "Готово",
+            "✅ session.pkl импортирован.\n\n"
+            "Проверяю сессию..."
+        )
+        self.append_log(f"[+] Импортирован session.pkl: {pkl_path}")
+        self._start_session_check()
+
+    def on_load_pdou_json(self):
+        """Импорт pdou_token.json + pdou_cookies.json."""
+        token_path, _ = QFileDialog.getOpenFileName(
+            self, "Выберите pdou_token.json", str(Path.home()),
+            "JSON files (*.json);;Все файлы (*.*)"
+        )
+        if not token_path:
+            return
+
+        try:
+            shutil.copy2(token_path, PDOU_TOKEN_FILE)
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка",
+                                 f"Не удалось скопировать pdou_token.json:\n{e}")
+            return
+
+        # Спросим про pdou_cookies.json
+        adjacent = Path(token_path).parent / "pdou_cookies.json"
+        if adjacent.exists():
+            reply = QMessageBox.question(
+                self, "Импорт pdou_cookies.json",
+                f"Рядом найден pdou_cookies.json:\n{adjacent}\n\n"
+                "Скопировать его тоже?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                try:
+                    shutil.copy2(adjacent, PDOU_COOKIES_FILE)
+                except Exception as e:
+                    QMessageBox.warning(self, "Ошибка",
+                                        f"pdou_cookies.json: {e}")
+
+        self._refresh_statuses()
+        QMessageBox.information(
+            self, "Готово",
+            "✅ ПДОУ-сессия импортирована.\n\n"
+            "Откройте главное окно и вкладку «🎨 Кружки ПДОУ»."
+        )
+        self.append_log(f"[+] Импортирован pdou_token.json: {token_path}")
+
+    # ==================================================================
+    #  ВХОД ЧЕРЕЗ SELENIUM
+    # ==================================================================
+    def on_login_ejd(self):
         login = self.ejd_login_edit.text().strip()
         password = self.ejd_password_edit.text()
         totp_key = self.ejd_totp_edit.text().strip() or None
 
         if not login or not password:
-            QMessageBox.warning(self, "Ошибка", "Введите логин и пароль ЭЖД.")
+            QMessageBox.warning(self, "Ошибка",
+                                "Введите логин и пароль ЭЖД.")
             return
 
         if self.ejd_remember_cb.isChecked():
@@ -808,234 +930,43 @@ class AuthWindow(QWidget):
         self._set_ejd_ui_enabled(False)
         self.append_log("⏳ Запуск браузера для входа (ЭЖД)...")
 
-        self.auth_worker = AuthWorker(login, password, totp_key, "chrome",
-                                     pdou_mode=False)
-        self.auth_worker.log.connect(self.append_log)
-        self.auth_worker.cookies_ready.connect(self.on_cookies_ready)
-        self.auth_worker.finished_ok.connect(self.on_ejd_login_ok)
-        self.auth_worker.finished_err.connect(self.on_login_err)
-        self.auth_worker.start()
+        self.ejd_auth_worker = AuthWorker(login, password, totp_key,
+                                          pdou_mode=False)
+        self.ejd_auth_worker.log.connect(self.append_log)
+        self.ejd_auth_worker.cookies_ready.connect(self.on_cookies_ready)
+        self.ejd_auth_worker.finished_ok.connect(self.on_ejd_login_ok)
+        self.ejd_auth_worker.finished_err.connect(self.on_ejd_login_err)
+        self.ejd_auth_worker.start()
 
-    def on_ejd_login_ok(self, auth):
-        self.auth = auth
-        self.append_log("[+] Вход (ЭЖД) выполнен. Открываю главное окно...")
-        QTimer.singleShot(500, self._open_main_window)
-
-    # ==================================================================
-    #  ПДОУ — кнопки
-    # ==================================================================
-    def on_pdou_paste(self):
-        from PySide6.QtWidgets import QApplication
-        text = QApplication.clipboard().text().strip()
-        if text:
-            self.pdou_token_edit.setText(text)
-            self.append_log(f"[clipboard] ПДОУ: вставлено {len(text)} символов")
-
-    def on_pdou_check(self):
-        token = self.pdou_token_edit.text().strip()
-        if not token:
-            QMessageBox.warning(self, "Ошибка", "Введите ПДОУ-токен.")
-            return
-        self._run_pdou_check(token, silent=False)
-
-    def _run_pdou_check(self, token: str, silent: bool = False):
-        self.pdou_check_btn.setEnabled(False)
-        self.append_log("[i] Проверяю ПДОУ-токен через /User/CurrentUser...")
-
-        self.pdou_check_worker = PDOUTokenCheckThread(token)
-        self.pdou_check_worker.log.connect(self.append_log)
-
-        def _on_done(ok, user_name, roles, reason):
-            self.pdou_check_btn.setEnabled(True)
-            if ok:
-                self.pdou_user_name = user_name
-                self.pdou_roles = roles
-                self._update_pdou_status(True, user_name, roles)
-                if not silent:
-                    roles_text = "\n".join(f"• {r}" for r in roles) if roles else "(роли отсутствуют)"
-                    has_pdou = any(
-                        "оператор" in r.lower() or "пдоу" in r.lower() or "круж" in r.lower()
-                        for r in roles
-                    )
-                    if has_pdou:
-                        QMessageBox.information(
-                            self, "Токен рабочий",
-                            f"✅ Пользователь: {user_name}\n\nРоли ЕСЗ:\n{roles_text}\n\n"
-                            "Нажмите «💾 Сохранить»."
-                        )
-                    else:
-                        QMessageBox.warning(
-                            self, "Нет прав ПДОУ",
-                            f"⚠️ Пользователь: {user_name}\n\nРоли ЕСЗ:\n{roles_text}\n\n"
-                            "Прав на кружки не видно."
-                        )
-            else:
-                self._update_pdou_status(False)
-                if not silent:
-                    QMessageBox.warning(self, "Проверка не удалась", reason)
-
-        self.pdou_check_worker.finished.connect(_on_done)
-        self.pdou_check_worker.start()
-
-    def on_pdou_save(self):
-        token = self.pdou_token_edit.text().strip()
-        if not token:
-            QMessageBox.warning(self, "Ошибка", "Введите ПДОУ-токен.")
-            return
-        if save_pdou_token(token, self.pdou_user_name, self.pdou_roles):
-            self._update_pdou_status(True, self.pdou_user_name, self.pdou_roles)
-            self.append_log(f"[+] ПДОУ-токен сохранён ({self.pdou_user_name or 'без имени'})")
-            QMessageBox.information(
-                self, "Готово",
-                f"✅ Токен сохранён.\n\nФайл: {PDOU_TOKEN_FILE}"
-            )
-        else:
-            QMessageBox.critical(self, "Ошибка", "Не удалось сохранить токен.")
-
-    def on_pdou_from_ejd(self):
-        if not self.auth and SESSION_FILE.exists():
-            from auth import dn_Auth
-            auth = dn_Auth()
-            if auth.load_session():
-                self.auth = auth
-
-        if not self.auth or not self.auth.session:
-            QMessageBox.warning(
-                self, "Ошибка",
-                "Нет активной ЭЖД-сессии.\n\n"
-                "Сначала войдите в ЭЖД слева, затем повторите."
-            )
-            return
-
-        self.append_log("[i] Запрашиваю /core/api/profile...")
-        try:
-            profile = self.auth.fetch("core/api/profile")
-        except Exception as e:
-            QMessageBox.critical(self, "Ошибка", f"Не удалось получить профиль:\n{e}")
-            return
-
-        if not isinstance(profile, dict):
-            QMessageBox.warning(self, "Ошибка", "Пустой ответ профиля.")
-            return
-
-        token = profile.get("authentication_token") or ""
-        if not token:
-            QMessageBox.warning(
-                self, "Не найдено",
-                "В ответе /core/api/profile нет authentication_token."
-            )
-            return
-
-        self.pdou_token_edit.setText(token)
-        first = profile.get("first_name", "")
-        last = profile.get("last_name", "")
-        user_name = f"{last} {first}".strip()
-        self.pdou_user_name = user_name
-        self.append_log(f"[+] Токен из ЭЖД ({user_name})")
-        QMessageBox.information(
-            self, "Токен получен",
-            f"Токен взят из ЭЖД-сессии.\n\nПользователь: {user_name}\n\n"
-            "Нажмите «🔍 Проверить»."
-        )
-
-    def on_pdou_clear(self):
-        reply = QMessageBox.question(
-            self, "Очистить ПДОУ-токен?",
-            "Удалить сохранённый токен ПДОУ?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-        )
-        if reply != QMessageBox.StandardButton.Yes:
-            return
-        clear_pdou_token()
-        self.pdou_token_edit.clear()
-        self.pdou_user_name = ""
-        self.pdou_roles = []
-        self._update_pdou_status(False)
-        self.append_log("[i] ПДОУ-токен удалён")
-
-    def on_login_as_pdou(self):
+    def on_login_pdou(self):
         login = self.pdou_login_edit.text().strip()
         password = self.pdou_password_edit.text()
         totp_key = self.pdou_totp_edit.text().strip() or None
 
         if not login or not password:
             QMessageBox.warning(self, "Ошибка",
-                                "Введите логин и пароль учётки с доступом к ПДОУ.")
+                                "Введите логин и пароль учётки ПДОУ.")
             return
 
-        answer = QMessageBox.question(
+        reply = QMessageBox.question(
             self, "Вход как ПДОУ",
-            "Будет сохранён ТОЛЬКО ПДОУ-токен (pdou_token.json).\n"
-            "ЭЖД-сессия не изменится.\n\nПродолжить?",
-            QMessageBox.Yes | QMessageBox.No,
+            "Сохранится ТОЛЬКО ПДОУ-сессия (не ЭЖД).\nПродолжить?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         )
-        if answer != QMessageBox.Yes:
+        if reply != QMessageBox.StandardButton.Yes:
             return
 
         self._set_pdou_ui_enabled(False)
-        self.append_log("⏳ Запуск браузера (ПДОУ)...")
+        self.append_log("⏳ Запуск браузера для входа (ПДОУ)...")
 
-        self.auth_worker = AuthWorker(login, password, totp_key, "chrome",
-                                     pdou_mode=True)
-        self.auth_worker.log.connect(self.append_log)
-        self.auth_worker.cookies_ready.connect(self.on_cookies_ready)
-        self.auth_worker.finished_ok.connect(self.on_pdou_login_ok)
-        self.auth_worker.finished_err.connect(self.on_login_err)
-        self.auth_worker.start()
+        self.pdou_auth_worker = AuthWorker(login, password, totp_key,
+                                           pdou_mode=True)
+        self.pdou_auth_worker.log.connect(self.append_log)
+        self.pdou_auth_worker.cookies_ready.connect(self.on_cookies_ready)
+        self.pdou_auth_worker.finished_ok.connect(self.on_pdou_login_ok)
+        self.pdou_auth_worker.finished_err.connect(self.on_pdou_login_err)
+        self.pdou_auth_worker.start()
 
-    def on_pdou_login_ok(self, auth):
-        self._set_pdou_ui_enabled(True)
-
-        data = load_pdou_token()
-        user_name = data.get("user_name", "")
-        token = data.get("aupd_token", "")
-        roles = data.get("user_roles", [])
-
-        if token:
-            self.pdou_token_edit.setText(token)
-            self.pdou_user_name = user_name
-            self.pdou_roles = roles
-            self._run_pdou_check(token, silent=True)
-
-        self.append_log(f"[+] ПДОУ-токен сохранён. Пользователь: {user_name}")
-        QMessageBox.information(
-            self, "ПДОУ-токен сохранён",
-            f"✅ Токен для ПДОУ сохранён.\n\n"
-            f"Пользователь: {user_name or 'неизвестен'}\n"
-            f"Файл: {PDOU_TOKEN_FILE}\n\n"
-            "ЭЖД-сессия не изменилась."
-        )
-
-    def _update_pdou_status(self, ok, user_name="", roles=None):
-        if ok:
-            roles = roles or []
-            has_pdou = any(
-                "оператор" in r.lower() or "пдоу" in r.lower() or "круж" in r.lower()
-                for r in roles
-            )
-            marker = "✅" if has_pdou else "⚠️"
-            roles_text = ", ".join(roles) if roles else "роли отсутствуют"
-            self.pdou_status_label.setText(
-                f"{marker} {user_name or 'неизвестен'}\n"
-                f"Роли ЕСЗ: {roles_text}"
-            )
-            if has_pdou:
-                self.pdou_status_label.setStyleSheet(
-                    "color: #059669; font-weight: bold; padding: 4px;"
-                )
-            else:
-                self.pdou_status_label.setStyleSheet(
-                    "color: #d97706; font-weight: bold; padding: 4px;"
-                )
-        else:
-            self.pdou_status_label.setText("❌ Токен не задан или не работает")
-            self.pdou_status_label.setStyleSheet(
-                "color: #dc2626; font-weight: bold; padding: 4px;"
-            )
-
-    # ==================================================================
-    #  Общие кнопки
-    # ==================================================================
     def on_cookies_ready(self):
         msg = QMessageBox(self)
         msg.setWindowTitle("Куки получены")
@@ -1050,123 +981,120 @@ class AuthWindow(QWidget):
                                   QMessageBox.ButtonRole.DestructiveRole)
         msg.setDefaultButton(ok_btn)
         msg.exec()
+
         clicked = msg.clickedButton()
-        if self.auth_worker is None:
+        worker = self.ejd_auth_worker or self.pdou_auth_worker
+        if worker is None:
             return
         if clicked == close_btn:
-            self.auth_worker._close_browser_event.set()
+            worker._close_browser_event.set()
         else:
-            self.auth_worker._detach_browser_event.set()
+            worker._detach_browser_event.set()
 
-    def on_login_err(self, err: str):
+    def on_ejd_login_ok(self, auth):
+        self.auth = auth
         self._set_ejd_ui_enabled(True)
-        self._set_pdou_ui_enabled(True)
-        self.append_log(f"[!] {err}")
+        self._refresh_statuses()
+        self.append_log("[+] ЭЖД: вход выполнен. Открываю главное окно...")
+        QTimer.singleShot(500, self._open_main_window)
+
+    def on_ejd_login_err(self, err: str):
+        self._set_ejd_ui_enabled(True)
+        self.append_log(f"[!] ЭЖД: {err}")
         QMessageBox.critical(self, "Ошибка входа", err)
 
-    def on_start_monitor(self):
-        import subprocess
-        import sys as _sys
-        from pathlib import Path as _Path
+    def on_pdou_login_ok(self, auth):
+        self._set_pdou_ui_enabled(True)
+        self._refresh_statuses()
+        self.append_log("[+] ПДОУ: вход выполнен, токен сохранён.")
 
-        project_root = _Path(__file__).resolve().parent.parent
-        monitor_script = project_root / "session_monitor.py"
-
-        if not monitor_script.exists():
-            QMessageBox.warning(self, "Не найден",
-                                f"Файл не найден:\n{monitor_script}")
-            return
-
-        answer = QMessageBox.question(
-            self, "Монитор сессии",
-            "Запустить монитор?\n\nТребуется Chrome с --remote-debugging-port=9222.",
-            QMessageBox.Yes | QMessageBox.No,
+        data = load_pdou_token()
+        user_name = data.get("user_name", "")
+        QMessageBox.information(
+            self, "ПДОУ-сессия сохранена",
+            f"✅ ПДОУ-сессия сохранена.\n\n"
+            f"Пользователь: {user_name or 'неизвестен'}"
         )
-        if answer != QMessageBox.Yes:
+
+    def on_pdou_login_err(self, err: str):
+        self._set_pdou_ui_enabled(True)
+        self.append_log(f"[!] ПДОУ: {err}")
+        QMessageBox.critical(self, "Ошибка входа ПДОУ", err)
+
+    # ==================================================================
+    #  ОЧИСТКА
+    # ==================================================================
+    def on_clear_ejd(self):
+        reply = QMessageBox.question(
+            self, "Очистить ЭЖД-сессию?",
+            "Удалить session.pkl, auth_data.json, credentials.json?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if reply != QMessageBox.StandardButton.Yes:
             return
+        for fname in EJD_FILES:
+            try:
+                (DATA_DIR / fname).unlink(missing_ok=True)
+            except Exception:
+                pass
+        self._refresh_statuses()
+        self.append_log("[i] ЭЖД-сессия очищена")
 
-        try:
-            if _sys.platform == "win32":
-                subprocess.Popen(
-                    ["cmd", "/k", _sys.executable, str(monitor_script)],
-                    cwd=str(project_root),
-                    creationflags=subprocess.CREATE_NEW_CONSOLE,
-                )
-            else:
-                subprocess.Popen(
-                    [_sys.executable, str(monitor_script)],
-                    cwd=str(project_root),
-                )
-            self.append_log("[i] Монитор запущен")
-        except Exception as e:
-            QMessageBox.critical(self, "Ошибка", f"Не удалось:\n{e}")
-
-    def on_open_token_dialog(self):
-        from ui.token_import_dialog import TokenImportDialog
-        dlg = TokenImportDialog(self)
-        dlg.tokens_saved.connect(self._on_tokens_saved)
-        dlg.exec()
-
-    def _on_tokens_saved(self, auth):
-        if auth is None:
+    def on_clear_pdou(self):
+        reply = QMessageBox.question(
+            self, "Очистить ПДОУ-сессию?",
+            "Удалить pdou_token.json и pdou_cookies.json?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if reply != QMessageBox.StandardButton.Yes:
             return
-        self.append_log("[+] Токены ЭЖД импортированы, открываю окно…")
-        self.auth = auth
-        QTimer.singleShot(300, self._open_main_window)
+        for fname in PDOU_FILES:
+            try:
+                (DATA_DIR / fname).unlink(missing_ok=True)
+            except Exception:
+                pass
+        self._refresh_statuses()
+        self.append_log("[i] ПДОУ-сессия очищена")
 
     def on_clear_all(self):
-        answer = QMessageBox.question(
+        reply = QMessageBox.question(
             self, "Очистить всё?",
-            "Удалить:\n"
-            "• логин/пароль/TOTP ЭЖД\n"
-            "• session.pkl и auth_data.json\n"
-            "• pdou_token.json\n\n"
-            "Продолжить?",
-            QMessageBox.Yes | QMessageBox.No,
+            "Удалить все сохранённые сессии (ЭЖД + ПДОУ)?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         )
-        if answer != QMessageBox.Yes:
+        if reply != QMessageBox.StandardButton.Yes:
             return
-
-        clear_credentials()
-        clear_session()
-        clear_pdou_token()
-
+        for fname in EJD_FILES + PDOU_FILES:
+            try:
+                (DATA_DIR / fname).unlink(missing_ok=True)
+            except Exception:
+                pass
         self.ejd_login_edit.clear()
         self.ejd_password_edit.clear()
         self.ejd_totp_edit.clear()
-        self.pdou_token_edit.clear()
-        self.pdou_user_name = ""
-        self.pdou_roles = []
-
-        self._update_pdou_status(False)
-        self.ejd_status_label.setText("❌ Данные удалены")
-        self.ejd_status_label.setStyleSheet("color: #c0392b; font-weight: bold;")
-        self.append_log("[i] Все сохранённые данные удалены")
+        self.pdou_login_edit.clear()
+        self.pdou_password_edit.clear()
+        self.pdou_totp_edit.clear()
+        self._refresh_statuses()
+        self.append_log("[i] Все сессии очищены")
 
     # ==================================================================
-    #  Блокировка UI
+    #  БЛОКИРОВКА UI
     # ==================================================================
     def _set_ejd_ui_enabled(self, enabled: bool):
         self.ejd_login_btn.setEnabled(enabled)
-        self.load_cookies_btn.setEnabled(enabled)
-        self.browse_session_btn.setEnabled(enabled)
-        if enabled:
-            self._update_use_file_btn(self.session_path_edit.text())
-        else:
-            self.use_session_file_btn.setEnabled(False)
-        self.session_path_edit.setEnabled(enabled)
+        self.ejd_load_pkl_btn.setEnabled(enabled)
+        self.ejd_load_zip_btn.setEnabled(enabled)
+        self.ejd_clear_btn.setEnabled(enabled)
         self.ejd_login_edit.setEnabled(enabled)
         self.ejd_password_edit.setEnabled(enabled)
         self.ejd_totp_edit.setEnabled(enabled)
 
     def _set_pdou_ui_enabled(self, enabled: bool):
         self.pdou_login_btn.setEnabled(enabled)
-        self.pdou_check_btn.setEnabled(enabled)
-        self.pdou_save_btn.setEnabled(enabled)
-        self.pdou_paste_btn.setEnabled(enabled)
-        self.pdou_from_ejd_btn.setEnabled(enabled)
+        self.pdou_load_json_btn.setEnabled(enabled)
+        self.pdou_load_zip_btn.setEnabled(enabled)
         self.pdou_clear_btn.setEnabled(enabled)
         self.pdou_login_edit.setEnabled(enabled)
         self.pdou_password_edit.setEnabled(enabled)
         self.pdou_totp_edit.setEnabled(enabled)
-        self.pdou_token_edit.setEnabled(enabled)
