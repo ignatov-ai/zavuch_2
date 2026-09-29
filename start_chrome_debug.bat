@@ -1,21 +1,20 @@
 @echo off
-REM --- Закрываем все окна Chrome (важно!) ---
-taskkill /F /IM chrome.exe >nul 2>&1
-timeout /t 2 /nobreak >nul
+REM Запуск Chrome с отладочным портом для монитора сессии zavuch 2
+REM ВАЖНО: предварительно закройте все окна обычного Chrome!
 
-REM --- Путь к Chrome: подкорректируйте под себя, если он в другом месте ---
-set CHROME="C:\Program Files\Google\Chrome\Application\chrome.exe"
-if not exist %CHROME% (
-    set CHROME="C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"
+set CHROME_PATH="C:\Program Files\Google\Chrome\Application\chrome.exe"
+if not exist %CHROME_PATH% (
+    set CHROME_PATH="C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"
 )
 
-REM --- Отдельный профиль для отладки (чтобы не мешать основному) ---
-set PROFILE_DIR=%USERPROFILE%\ChromeDebugProfile
+if not exist %CHROME_PATH% (
+    echo [ОШИБКА] Chrome не найден по стандартным путям.
+    echo Откройте start_chrome_debug.bat и укажите путь вручную.
+    pause
+    exit /b 1
+)
 
-REM --- Запуск Chrome в режиме отладки ---
-start "" %CHROME% --remote-debugging-port=9222 --user-data-dir="%PROFILE_DIR%" https://school.mos.ru/
-
+echo Запускаю Chrome с отладочным портом 9222...
+echo Профиль: C:\chrome_debug_profile
 echo.
-echo Chrome запущен в режиме отладки на порту 9222.
-echo Войдите на school.mos.ru, затем вернитесь в token_monitor.py.
-pause
+start "" %CHROME_PATH% --remote-debugging-port=9222 --user-data-dir="C:\chrome_debug_profile"
