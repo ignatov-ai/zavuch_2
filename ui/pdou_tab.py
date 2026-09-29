@@ -3,20 +3,15 @@
 Вкладка «🎨 Кружки ПДОУ».
 Загрузка списка групп ПДОУ через esz.mos.ru.
 
-Требует ДВА токена + cookies:
-  • aupd_token (JWT RS256 из cookie aupd_token)
-  • esztoken  (JWT HS256 из Local Storage → eszToken)
-  • cookies   (session-cookie, mos_id, obr_id, subsystem_id, ...)
-
-Все три вспомогательных блока (Токены, Cookies, Журнал) — сворачиваемые.
-По умолчанию свёрнуты.
+Корпус определяется сразу из префикса программы (serviceName),
+дополнительные запросы к /ServiceClass/{id} не выполняются.
 """
 import os
 from datetime import datetime
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QLineEdit,
-    QPushButton, QPlainTextEdit, QMessageBox, QFrame, QGroupBox,
+    QPushButton, QPlainTextEdit, QMessageBox, QGroupBox,
     QTableWidget, QTableWidgetItem, QProgressBar, QComboBox,
     QFileDialog, QToolButton, QSizePolicy, QApplication
 )
@@ -419,9 +414,16 @@ class PDOUTab(QWidget):
         self.search_edit.setPlaceholderText(
             "Название группы / программа / педагог..."
         )
-        self.search_edit.setMinimumWidth(280)
+        self.search_edit.setMinimumWidth(240)
         self.search_edit.textChanged.connect(self.apply_filter)
         filter_layout.addWidget(self.search_edit)
+
+        filter_layout.addWidget(QLabel("Корпус:"))
+        self.building_filter = QComboBox()
+        self.building_filter.addItem("Все корпуса", None)
+        self.building_filter.setMinimumWidth(180)
+        self.building_filter.currentIndexChanged.connect(self.apply_filter)
+        filter_layout.addWidget(self.building_filter)
 
         filter_layout.addWidget(QLabel("Статус:"))
         self.status_filter = QComboBox()
@@ -449,9 +451,9 @@ class PDOUTab(QWidget):
         )
         self.groups_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.groups_table.horizontalHeader().setStretchLastSection(True)
-        self.groups_table.setColumnCount(8)
+        self.groups_table.setColumnCount(9)
         self.groups_table.setHorizontalHeaderLabels([
-            "Код", "Название группы", "Педагог", "Программа",
+            "Код", "Корпус", "Название группы", "Педагог", "Программа",
             "Даты обучения", "Ёмкость", "Записано", "Статус",
         ])
         self.groups_table.verticalHeader().setDefaultSectionSize(50)
@@ -491,7 +493,6 @@ class PDOUTab(QWidget):
         sb = self.console.verticalScrollBar()
         sb.setValue(sb.maximum())
 
-        # Счётчик в заголовке (виден даже свёрнутым)
         self._log_count += 1
         self.log_group.set_status_suffix(f"{self._log_count} стр.")
 
@@ -825,19 +826,61 @@ class PDOUTab(QWidget):
             return
 
         self.all_groups = groups
+        self._rebuild_building_filter()
         self.apply_filter()
         self.update_stats()
         self.export_btn.setEnabled(True)
 
-        QMessageBox.information(
-            self, "Готово", f"✅ Загружено групп: {len(groups)}"
-        )
+        without = sum(1 for g in groups if not g.get("building"))
+        msg = f"✅ Загружено групп: {len(groups)}"
+        if without:
+            msg += f"\n\n🏢 Без корпуса: {without}."
+        QMessageBox.information(self, "Готово", msg)
 
     def on_load_error(self, error):
         self.progress_bar.setVisible(False)
         self.progress_bar.setRange(0, 100)
         self.load_btn.setEnabled(True)
         QMessageBox.critical(self, "Ошибка загрузки", f"Ошибка:\n{error}")
+
+    # ================================================================
+    #  ФИЛЬТР ПО КОРПУСАМ
+    # ================================================================
+    def _rebuild_building_filter(self):
+        """
+        Перестраивает выпадающий список корпусов.
+        Сохраняет текущий выбранный корпус, если он ещё есть.
+        """
+        current = self.building_filter.currentData()
+
+        self.building_filter.blockSignals(True)
+        self.building_filter.clear()
+        self.building_filter.addItem("Все корпуса", None)
+
+        buildings = set()
+        without = 0
+        for g in self.all_groups:
+            b = g.get("building", "")
+            if b:
+                buildings.add(b)
+            else:
+                without += 1
+
+        for b in sorted(buildings):
+            count = sum(1 for g in self.all_groups if g.get("building") == b)
+            self.building_filter.addItem(f"{b} ({count})", b)
+
+        if without:
+            self.building_filter.addItem(
+                f"⚠️ Без корпуса ({without})", "__NONE__"
+            )
+
+        if current is not None:
+            idx = self.building_filter.findData(current)
+            if idx >= 0:
+                self.building_filter.setCurrentIndex(idx)
+
+        self.building_filter.blockSignals(False)
 
     # ================================================================
     #  ФИЛЬТРЫ / СТАТИСТИКА
@@ -847,13 +890,16 @@ class PDOUTab(QWidget):
         active = sum(1 for g in self.all_groups if g.get("serviceClassStatus") == 1)
         running = sum(1 for g in self.all_groups if g.get("serviceClassStatus") == 2)
         done = sum(1 for g in self.all_groups if g.get("serviceClassStatus") == 3)
+        without = sum(1 for g in self.all_groups if not g.get("building"))
         self.stats_label.setText(
             f"Всего: {total} | Активных: {active} | "
-            f"Идёт обучение: {running} | Завершено: {done}"
+            f"Идёт обучение: {running} | Завершено: {done} | "
+            f"Без корпуса: {without}"
         )
 
     def apply_filter(self):
         search_text = self.search_edit.text().lower().strip()
+        building_filter = self.building_filter.currentData()
         status_filter = self.status_filter.currentData()
 
         filtered = []
@@ -867,9 +913,19 @@ class PDOUTab(QWidget):
                 ]).lower()
                 if search_text not in haystack:
                     continue
+
+            if building_filter is not None:
+                if building_filter == "__NONE__":
+                    if g.get("building"):
+                        continue
+                else:
+                    if g.get("building") != building_filter:
+                        continue
+
             if status_filter != "all":
                 if g.get("serviceClassStatus") != status_filter:
                     continue
+
             filtered.append(g)
 
         self.filtered_groups = filtered
@@ -877,8 +933,31 @@ class PDOUTab(QWidget):
 
     def clear_filters(self):
         self.search_edit.clear()
+        self.building_filter.setCurrentIndex(0)
         self.status_filter.setCurrentIndex(0)
         self.apply_filter()
+
+    # ================================================================
+    #  ЦВЕТА ДЛЯ КОРПУСОВ
+    # ================================================================
+    @staticmethod
+    def _building_color(building: str) -> QColor:
+        """
+        Возвращает цвет фона для ячейки «Корпус».
+        Известные корпуса получают свой цвет, остальные — серый.
+        """
+        if not building:
+            return QColor(255, 235, 235)   # светло-красный — нет данных
+
+        palette = {
+            "Маршала Захарова":     QColor(219, 234, 254),   # голубой
+            "Домодедовская":        QColor(220, 252, 231),   # зелёный
+            "Совхоз им. Ленина":    QColor(254, 249, 195),   # жёлтый
+            "ЗИЛ / Лихачёва":       QColor(237, 233, 254),   # сиреневый
+            "Елецкая":              QColor(255, 237, 213),   # оранжевый
+            "Шипиловская":          QColor(226, 232, 240),   # серо-голубой
+        }
+        return palette.get(building, QColor(241, 245, 249))
 
     # ================================================================
     #  ТАБЛИЦА
@@ -911,41 +990,75 @@ class PDOUTab(QWidget):
                     it.setBackground(row_color)
                 return it
 
+            # Код
             self.groups_table.setItem(
                 i, 0, make_item(g.get("code", ""), Qt.AlignmentFlag.AlignCenter)
             )
+
+            # Корпус — отдельная колонка с собственным цветом
+            building = g.get("building", "") or ""
+            building_item = QTableWidgetItem(building if building else "—")
+            building_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            building_item.setBackground(self._building_color(building))
+            if building:
+                building_item.setToolTip(
+                    f"Определён по программе: {g.get('serviceName', '')}"
+                )
+            else:
+                building_item.setToolTip(
+                    "Корпус не определён.\n"
+                    "Префикс программы не распознан."
+                )
+            self.groups_table.setItem(i, 1, building_item)
+
+            # Название
             name_item = make_item((g.get("name", "") or "").strip())
             name_item.setToolTip(f"ID: {g.get('id')}")
-            self.groups_table.setItem(i, 1, name_item)
-            self.groups_table.setItem(i, 2, make_item(g.get("supervisorPerson", "")))
+            self.groups_table.setItem(i, 2, name_item)
+
+            # Педагог
+            self.groups_table.setItem(
+                i, 3, make_item(g.get("supervisorPerson", ""))
+            )
+
+            # Программа
             prog_item = make_item((g.get("serviceName", "") or "").strip())
             prog_item.setToolTip(f"serviceId: {g.get('serviceId')}")
-            self.groups_table.setItem(i, 3, prog_item)
+            self.groups_table.setItem(i, 4, prog_item)
+
+            # Даты обучения
             self.groups_table.setItem(
-                i, 4, make_item(g.get("trainDates", ""), Qt.AlignmentFlag.AlignCenter)
+                i, 5, make_item(g.get("trainDates", ""), Qt.AlignmentFlag.AlignCenter)
             )
+
+            # Ёмкость
             self.groups_table.setItem(
-                i, 5, make_item(g.get("capacity", 0), Qt.AlignmentFlag.AlignCenter)
+                i, 6, make_item(g.get("capacity", 0), Qt.AlignmentFlag.AlignCenter)
             )
+
+            # Записано
             self.groups_table.setItem(
-                i, 6, make_item(g.get("included", 0), Qt.AlignmentFlag.AlignCenter)
+                i, 7, make_item(g.get("included", 0), Qt.AlignmentFlag.AlignCenter)
             )
+
+            # Статус
             status_text = PDOUCollector.get_status_text(status)
             self.groups_table.setItem(
-                i, 7, make_item(status_text, Qt.AlignmentFlag.AlignCenter)
+                i, 8, make_item(status_text, Qt.AlignmentFlag.AlignCenter)
             )
 
         self.groups_table.setUpdatesEnabled(True)
         self.groups_table.setSortingEnabled(True)
 
         self.groups_table.setColumnWidth(0, 100)
-        self.groups_table.setColumnWidth(1, 280)
-        self.groups_table.setColumnWidth(2, 220)
-        self.groups_table.setColumnWidth(3, 320)
-        self.groups_table.setColumnWidth(4, 190)
-        self.groups_table.setColumnWidth(5, 90)
-        self.groups_table.setColumnWidth(6, 90)
-        self.groups_table.setColumnWidth(7, 130)
+        self.groups_table.setColumnWidth(1, 170)
+        self.groups_table.setColumnWidth(2, 260)
+        self.groups_table.setColumnWidth(3, 200)
+        self.groups_table.setColumnWidth(4, 300)
+        self.groups_table.setColumnWidth(5, 180)
+        self.groups_table.setColumnWidth(6, 80)
+        self.groups_table.setColumnWidth(7, 80)
+        self.groups_table.setColumnWidth(8, 120)
 
     # ================================================================
     #  ЭКСПОРТ
@@ -976,8 +1089,10 @@ class PDOUTab(QWidget):
             ws = wb.active
             ws.title = "Кружки ПДОУ"
 
-            headers = ["Код", "Название группы", "Педагог", "Программа",
-                       "Даты обучения", "Ёмкость", "Записано", "Статус"]
+            headers = [
+                "Код", "Корпус", "Название группы", "Педагог", "Программа",
+                "Даты обучения", "Ёмкость", "Записано", "Статус",
+            ]
             ws.append(headers)
 
             header_font = Font(bold=True, color="FFFFFF", size=11)
@@ -999,6 +1114,7 @@ class PDOUTab(QWidget):
                 )
                 ws.append([
                     g.get("code", ""),
+                    g.get("building", "") or "—",
                     (g.get("name", "") or "").strip(),
                     g.get("supervisorPerson", ""),
                     (g.get("serviceName", "") or "").strip(),
@@ -1008,8 +1124,8 @@ class PDOUTab(QWidget):
                     status_text,
                 ])
 
-            col_widths = {"A": 12, "B": 40, "C": 28, "D": 45,
-                          "E": 24, "F": 10, "G": 10, "H": 16}
+            col_widths = {"A": 12, "B": 20, "C": 40, "D": 28, "E": 45,
+                          "F": 24, "G": 10, "H": 10, "I": 16}
             for col_letter, width in col_widths.items():
                 ws.column_dimensions[col_letter].width = width
 
