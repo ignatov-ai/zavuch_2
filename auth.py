@@ -5,16 +5,17 @@
 Основной способ: Selenium + webdriver-manager + CDP.
 Резервный: cookies браузера через browser_cookie3.
 
-ВСЕ файлы сессии хранятся в ~/.zavuch2/ (отдельно от старой версии ~/.ejd_checker/):
+Все файлы сессии хранятся в ~/.zavuch2/ (НЕ трогаем ~/.ejd_checker/):
   • session.pkl      — cookies dnevnik.mos.ru
   • auth_data.json   — auth_token, profile_id, school_id
+  • pdou_token.json  — отдельный токен для ПДОУ (может быть от другого пользователя)
 """
 import requests
 from urllib.parse import urljoin
 import pickle
 import json
-from pathlib import Path
 import time
+from pathlib import Path
 
 
 class dn_Auth:
@@ -28,17 +29,19 @@ class dn_Auth:
         self.session = None
         self.pid = ""
         self.sid = ""
-        self.aid = "14"
+        self.aid = "14"        # ID учебного года 2026-2027
         self.curr_aid = "14"
 
+        # Хранимые отдельно токены
         self.auth_token = ""
         self.profile_id = ""
 
-        # ✅ НОВАЯ ПАПКА
+        # Папка сессии
         self.session_dir = Path.home() / '.zavuch2'
         self.session_dir.mkdir(exist_ok=True)
         self.session_file = self.session_dir / 'session.pkl'
         self.auth_data_file = self.session_dir / 'auth_data.json'
+        self.pdou_token_file = self.session_dir / 'pdou_token.json'
 
     # ================================================================
     #  СОХРАНЕНИЕ / ЗАГРУЗКА СЕССИИ
@@ -155,12 +158,69 @@ class dn_Auth:
             return False
 
     # ================================================================
-    #  АВТОРИЗАЦИЯ ЧЕРЕЗ SELENIUM
+    #  СОХРАНЕНИЕ ПДОУ-ТОКЕНА (отдельный файл)
+    # ================================================================
+    def _save_pdou_token_if_free(self, auth_token_from_profile: str,
+                                 user_name: str, log=None) -> bool:
+        """
+        Сохраняет authentication_token в pdou_token.json,
+        НО ТОЛЬКО ЕСЛИ там нет токена от другого пользователя.
+
+        Логика:
+          • Если файла нет → сохраняем.
+          • Если user_name совпадает → обновляем.
+          • Если user_name другой → НЕ трогаем (не перетираем коллегу).
+        """
+        try:
+            existing = {}
+            if self.pdou_token_file.exists():
+                try:
+                    existing = json.loads(self.pdou_token_file.read_text(encoding="utf-8"))
+                except Exception:
+                    existing = {}
+
+            existing_user = (existing.get("user_name") or "").strip()
+            current_user = (user_name or "").strip()
+
+            if existing.get("aupd_token") and existing_user and existing_user != current_user:
+                # Токен от ДРУГОГО пользователя — не перетираем
+                if log:
+                    log(f"[i] pdou_token.json — токен от '{existing_user}', не трогаю.")
+                return False
+
+            self.pdou_token_file.write_text(
+                json.dumps({
+                    "aupd_token": auth_token_from_profile,
+                    "user_name": current_user,
+                    "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "source": "selenium",
+                }, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            if log:
+                log(f"[+] authentication_token сохранён в {self.pdou_token_file}")
+            return True
+        except Exception as e:
+            if log:
+                log(f"[!] Не удалось сохранить pdou_token.json: {e}")
+            return False
+
+    # ================================================================
+    #  Selenium-авторизация
     # ================================================================
     def login_with_selenium_advanced(self, username, password,
                                      totp_key=None, browser='chrome',
                                      log_callback=None,
-                                     gui_confirm_callback=None):
+                                     gui_confirm_callback=None,
+                                     pdou_mode=False):
+        """
+        Продвинутая авторизация через Selenium.
+
+        Args:
+            pdou_mode: если True — после успеха НЕ сохраняем session.pkl,
+                       а только пишем authentication_token в pdou_token.json
+                       (используется кнопкой «Войти как ПДОУ»).
+        """
         import tempfile
         import traceback
 
@@ -177,6 +237,7 @@ class dn_Auth:
             log("=== Начало авторизации через Selenium ===")
             log(f"[i] Логин: {username}")
             log(f"[i] 2FA: {'TOTP' if totp_key else 'SMS вручную'}")
+            log(f"[i] Режим: {'ПДОУ (только токен)' if pdou_mode else 'ЭЖД (полная сессия)'}")
 
             from selenium import webdriver
             from selenium.webdriver.common.by import By
@@ -229,6 +290,7 @@ class dn_Auth:
 
             log("[+] Браузер запущен")
 
+            # --- Открываем страницу входа ---
             login_url = (
                 "https://login.mos.ru/sps/login/methods/password"
                 "?bo=%2Fsps%2Foauth%2Fae%3Fresponse_type%3Dcode"
@@ -247,6 +309,7 @@ class dn_Auth:
             time.sleep(2)
             log("[+] Страница загружена")
 
+            # --- Логин ---
             log("[i] Ввожу логин...")
             time.sleep(1.5)
             login_el = wait.until(EC.element_to_be_clickable((By.ID, "login")))
@@ -256,6 +319,7 @@ class dn_Auth:
             login_el.send_keys(username)
             log("[+] Логин введён")
 
+            # --- Пароль ---
             log("[i] Ввожу пароль...")
             time.sleep(1.5)
             pass_el = wait.until(EC.element_to_be_clickable((By.ID, "password")))
@@ -265,6 +329,7 @@ class dn_Auth:
             pass_el.send_keys(password)
             log("[+] Пароль введён")
 
+            # --- Кнопка «Войти» ---
             log("[i] Ищу кнопку 'Войти'...")
             time.sleep(1.5)
             submit = None
@@ -288,6 +353,7 @@ class dn_Auth:
             log("[+] Кнопка нажата")
             time.sleep(3)
 
+            # --- 2FA ---
             if "methods2" in driver.current_url:
                 log("[+] Требуется 2FA")
 
@@ -327,6 +393,7 @@ class dn_Auth:
                         raise Exception("Таймаут ожидания ручного ввода SMS")
                     log("[+] Вход выполнен вручную")
 
+            # --- Ждём редирект на school.mos.ru ---
             log("[i] Жду редирект на school.mos.ru...")
             end = time.time() + 60
             while time.time() < end:
@@ -336,41 +403,36 @@ class dn_Auth:
             log(f"[+] Текущий URL: {driver.current_url}")
             time.sleep(3)
 
+            # --- Переходим на dnevnik.mos.ru ---
             log("[i] Перехожу на dnevnik.mos.ru для получения cookies...")
             try:
                 driver.get("https://dnevnik.mos.ru/")
-
                 end = time.time() + 20
-                dnevnik_opened = False
+                opened = False
                 while time.time() < end:
-                    current = driver.current_url
-                    if "dnevnik.mos.ru" in current:
-                        log(f"[+] Открыт dnevnik.mos.ru: {current}")
-                        dnevnik_opened = True
+                    if "dnevnik.mos.ru" in driver.current_url:
+                        log(f"[+] Открыт dnevnik.mos.ru: {driver.current_url}")
+                        opened = True
                         break
                     time.sleep(1)
-
-                if not dnevnik_opened:
-                    log(f"[!] Не удалось открыть dnevnik.mos.ru. Текущий URL: {driver.current_url}")
-                    log("[i] Пробую открыть напрямую /diary...")
+                if not opened:
+                    log(f"[!] Не удалось открыть dnevnik.mos.ru. URL: {driver.current_url}")
                     try:
                         driver.get("https://dnevnik.mos.ru/diary")
                         time.sleep(5)
                     except Exception as e:
                         log(f"[!] /diary тоже не открылся: {e}")
-
                 time.sleep(5)
                 log(f"[+] Финальный URL: {driver.current_url}")
             except Exception as e:
                 log(f"[!] Не удалось перейти: {e}")
 
+            # --- Собираем cookies и токены ---
             log("[i] Собираю cookies и токены...")
             all_cookies = {}
 
             try:
                 result = driver.execute_cdp_cmd("Network.getAllCookies", {})
-                total = len(result.get("cookies", []))
-                log(f"[i] CDP getAllCookies: {total} cookies")
                 for c in result.get("cookies", []):
                     name = c.get("name", "")
                     value = c.get("value", "")
@@ -386,6 +448,7 @@ class dn_Auth:
             except Exception as e:
                 log(f"[!] driver.get_cookies: {e}")
 
+            # Токен из storage
             token_from_storage = None
             try:
                 token_from_storage = driver.execute_script("""
@@ -413,7 +476,6 @@ class dn_Auth:
                 """)
             except Exception:
                 pass
-
             if not profile_id:
                 profile_id = all_cookies.get("profile_id")
 
@@ -421,23 +483,22 @@ class dn_Auth:
                 f"auth_token={'✅' if 'auth_token' in all_cookies else '❌'}, "
                 f"profile_id={profile_id or '❌'}")
 
+            # Ждём токен до 3 минут
             if "auth_token" not in all_cookies:
-                log("[!] auth_token не найден сразу.")
-                log("[i] Жду до 3 минут: откройте дневник в браузере (dnevnik.mos.ru/diary).")
-
+                log("[!] auth_token не найден сразу. Жду до 3 минут...")
                 end_wait = time.time() + 180
                 while time.time() < end_wait:
                     try:
-                        token_from_storage = driver.execute_script("""
+                        t = driver.execute_script("""
                             return window.sessionStorage.getItem('auth_token')
                                 || window.localStorage.getItem('auth_token')
                                 || window.sessionStorage.getItem('token')
                                 || window.localStorage.getItem('token')
                                 || null;
                         """)
-                        if token_from_storage:
-                            all_cookies["auth_token"] = token_from_storage
-                            log(f"[+] auth_token появился: {str(token_from_storage)[:30]}...")
+                        if t:
+                            all_cookies["auth_token"] = t
+                            log(f"[+] auth_token появился: {str(t)[:30]}...")
                             break
                         for c in driver.get_cookies():
                             if c.get("name") == "auth_token":
@@ -458,6 +519,7 @@ class dn_Auth:
                 log("[!] Не удалось получить ни одной cookies")
                 return False
 
+            # --- Создаём requests.Session ---
             log(f"[i] Создаю requests.Session с {len(all_cookies)} cookies...")
             self.session = requests.Session()
             self.session.headers.update({
@@ -493,6 +555,7 @@ class dn_Auth:
             else:
                 log("[!] auth_token отсутствует — API вернёт 403")
 
+            # --- Проверка API ---
             log("[i] Проверяю авторизацию: GET core/api/schools")
             api_ok = False
             try:
@@ -501,27 +564,75 @@ class dn_Auth:
                     timeout=self.timeout
                 )
                 log(f"[i] HTTP {response.status_code}")
-
                 if response.status_code == 200:
                     data = response.json()
                     if data:
                         self.sid = data[0]["id"]
                         log(f"[+] Авторизация успешна! Школа: {data[0].get('name')}")
-                        self.save_session()
-                        log(f"[+] Сессия сохранена: {self.session_file}")
-                        log(f"[+] Auth-данные сохранены: {self.auth_data_file}")
                         api_ok = True
-                    else:
-                        log("[!] Пустой ответ API")
                 elif response.status_code == 403:
-                    log("[!] 403 Forbidden — cookies не подходят для API")
-                    log("[i] Тело ответа: " + response.text[:200])
+                    log("[!] 403 Forbidden")
                 else:
-                    log(f"[!] Неожиданный HTTP {response.status_code}")
-                    log(f"[i] Тело: {response.text[:200]}")
+                    log(f"[!] HTTP {response.status_code}: {response.text[:200]}")
             except Exception as e:
-                log(f"[!] Ошибка запроса к API: {e}")
+                log(f"[!] Ошибка запроса: {e}")
 
+            # === Сохраняем authentication_token отдельно (для ПДОУ) ===
+            authentication_token = ""
+            user_name = ""
+            try:
+                prof_resp = self.session.get(
+                    urljoin(self.base, "core/api/profile"),
+                    timeout=self.timeout
+                )
+                if prof_resp.status_code == 200:
+                    pdata = prof_resp.json()
+                    authentication_token = pdata.get("authentication_token") or ""
+                    last = pdata.get("last_name", "")
+                    first = pdata.get("first_name", "")
+                    user_name = f"{last} {first}".strip()
+                    log(f"[i] Профиль: {user_name}, "
+                        f"authentication_token={'✅' if authentication_token else '❌'}")
+            except Exception as e:
+                log(f"[!] Не удалось получить /core/api/profile: {e}")
+
+            # === РЕЖИМ ПДОУ: сохраняем ТОЛЬКО pdou_token.json ===
+            if pdou_mode:
+                if not authentication_token:
+                    log("[!] Не удалось получить authentication_token — нечего сохранять")
+                    return False
+
+                # Всегда перезаписываем в режиме ПДОУ (пользователь сам явно выбрал этот режим)
+                try:
+                    self.pdou_token_file.write_text(
+                        json.dumps({
+                            "aupd_token": authentication_token,
+                            "user_name": user_name,
+                            "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                            "source": "selenium_pdou_mode",
+                        }, ensure_ascii=False, indent=2),
+                        encoding="utf-8",
+                    )
+                    log(f"[+] ПДОУ-токен сохранён в {self.pdou_token_file}")
+                except Exception as e:
+                    log(f"[!] Не удалось сохранить pdou_token.json: {e}")
+                    return False
+
+                # НЕ трогаем session.pkl / auth_data.json
+                log("[i] ЭЖД-сессия не изменена (режим ПДОУ).")
+            else:
+                # === ОБЫЧНЫЙ РЕЖИМ: сохраняем session.pkl ===
+                if api_ok:
+                    self.save_session()
+                    log(f"[+] Сессия сохранена: {self.session_file}")
+
+                # Мягко сохраняем ПДОУ-токен, только если он «наш»
+                if authentication_token:
+                    self._save_pdou_token_if_free(
+                        authentication_token, user_name, log=log
+                    )
+
+            # --- GUI: попап «Куки получены» ---
             if gui_confirm_callback is not None:
                 keep_browser_open = True
                 try:

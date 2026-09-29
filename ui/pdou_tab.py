@@ -1,33 +1,188 @@
 # -*- coding: utf-8 -*-
 """
-Вкладка «Кружки ПДОУ».
-Загрузка списка групп ПДОУ через esz.mos.ru и отображение в таблице.
+Вкладка «🎨 Кружки ПДОУ».
+Загрузка списка групп ПДОУ через esz.mos.ru.
+
+Требует ДВА токена + cookies:
+  • aupd_token (JWT RS256 из cookie aupd_token)
+  • esztoken  (JWT HS256 из Local Storage → eszToken)
+  • cookies   (session-cookie, mos_id, obr_id, subsystem_id, ...)
+
+Все три вспомогательных блока (Токены, Cookies, Журнал) — сворачиваемые.
+По умолчанию свёрнуты.
 """
 import os
-import sys
 from datetime import datetime
 
-from PySide6.QtWidgets import *
+from PySide6.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QLineEdit,
+    QPushButton, QPlainTextEdit, QMessageBox, QFrame, QGroupBox,
+    QTableWidget, QTableWidgetItem, QProgressBar, QComboBox,
+    QFileDialog, QToolButton, QSizePolicy, QApplication
+)
 from PySide6.QtCore import QThread, Signal, Qt
 from PySide6.QtGui import QColor
 
-from collector_pdou import PDOUCollector
+from collector_pdou import PDOUCollector, PDOUToken, PDOUCookies
 
 
+# ============================================================
+#  Сворачиваемый блок
+# ============================================================
+class CollapsibleGroupBox(QWidget):
+    """
+    Сворачиваемый блок с заголовком-кнопкой (▶ / ▼) и содержимым.
+    По умолчанию — свёрнут.
+    """
+
+    def __init__(self, title: str, parent=None, collapsed: bool = True):
+        super().__init__(parent)
+        self._title_text = title
+        self._status_suffix = ""
+        self._collapsed = collapsed
+
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+
+        # === Заголовок ===
+        self._header_btn = QToolButton()
+        self._header_btn.setToolButtonStyle(
+            Qt.ToolButtonStyle.ToolButtonTextBesideIcon
+        )
+        self._header_btn.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
+        self._header_btn.setCheckable(True)
+        self._header_btn.setChecked(not collapsed)
+        self._header_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._header_btn.clicked.connect(self._on_header_clicked)
+        self._header_btn.setStyleSheet("""
+            QToolButton {
+                border: 2px solid #8b5cf6;
+                border-radius: 10px;
+                background-color: #f5f3ff;
+                padding: 8px 12px;
+                font-weight: bold;
+                font-size: 12pt;
+                color: #4c1d95;
+                text-align: left;
+            }
+            QToolButton:hover {
+                background-color: #ede9fe;
+            }
+            QToolButton:checked {
+                border-bottom-left-radius: 0px;
+                border-bottom-right-radius: 0px;
+                border-bottom: none;
+            }
+        """)
+
+        main_layout.addWidget(self._header_btn)
+
+        # === Контейнер содержимого ===
+        self._content = QWidget()
+        self._content.setObjectName("CollapsibleContent")
+        self._content.setStyleSheet("""
+            QWidget#CollapsibleContent {
+                background-color: #ffffff;
+                border: 2px solid #8b5cf6;
+                border-top: none;
+                border-bottom-left-radius: 10px;
+                border-bottom-right-radius: 10px;
+            }
+        """)
+
+        self._content_layout = QVBoxLayout(self._content)
+        self._content_layout.setContentsMargins(12, 10, 12, 12)
+        self._content_layout.setSpacing(8)
+
+        main_layout.addWidget(self._content)
+
+        self._apply_collapsed_state()
+        self._update_header_text()
+
+    # ------------------------------------------------------------------
+    def _on_header_clicked(self):
+        self._collapsed = not self._header_btn.isChecked()
+        self._apply_collapsed_state()
+        self._update_header_text()
+
+    def _apply_collapsed_state(self):
+        if self._collapsed:
+            self._content.setVisible(False)
+            self._header_btn.setArrowType(Qt.ArrowType.RightArrow)
+        else:
+            self._content.setVisible(True)
+            self._header_btn.setArrowType(Qt.ArrowType.DownArrow)
+
+    def _update_header_text(self):
+        arrow = "▶" if self._collapsed else "▼"
+        suffix = f"  —  {self._status_suffix}" if self._status_suffix else ""
+        self._header_btn.setText(f"{arrow}  {self._title_text}{suffix}")
+
+    # ------------------------------------------------------------------
+    def set_title(self, title: str):
+        self._title_text = title
+        self._update_header_text()
+
+    def set_collapsed(self, collapsed: bool):
+        self._collapsed = collapsed
+        self._header_btn.setChecked(not collapsed)
+        self._apply_collapsed_state()
+        self._update_header_text()
+
+    def is_collapsed(self) -> bool:
+        return self._collapsed
+
+    def content_layout(self) -> QVBoxLayout:
+        return self._content_layout
+
+    def set_status_suffix(self, text: str):
+        """Краткий статус в заголовке (виден в свёрнутом виде)."""
+        self._status_suffix = text or ""
+        self._update_header_text()
+
+
+# ============================================================
+#  Поток проверки токенов
+# ============================================================
+class PDOUTokenCheckThread(QThread):
+    finished = Signal(bool, str, list, str)   # (ok, user_name, roles, reason)
+    log = Signal(str)
+
+    def __init__(self, aupd_token, esztoken=""):
+        super().__init__()
+        self.aupd_token = aupd_token
+        self.esztoken = esztoken
+
+    def run(self):
+        try:
+            collector = PDOUCollector(self.aupd_token, self.esztoken)
+            collector.log_callback = lambda t: self.log.emit(t)
+            ok, user_name, roles, reason = collector.check_token()
+            self.finished.emit(ok, user_name, roles, reason)
+        except Exception as e:
+            self.finished.emit(False, "", [], f"Исключение: {e}")
+
+
+# ============================================================
+#  Поток загрузки групп
+# ============================================================
 class PDOULoadThread(QThread):
-    """Поток для загрузки списка групп ПДОУ"""
     finished = Signal(list)
     error = Signal(str)
     log_message = Signal(str)
 
-    def __init__(self, auth):
+    def __init__(self, aupd_token, esztoken):
         super().__init__()
-        self.auth = auth
+        self.aupd_token = aupd_token
+        self.esztoken = esztoken
 
     def run(self):
         try:
-            collector = PDOUCollector(self.auth)
-            collector.log_callback = lambda text: self.log_message.emit(text)
+            collector = PDOUCollector(self.aupd_token, self.esztoken)
+            collector.log_callback = lambda t: self.log_message.emit(t)
             groups = collector.get_all_groups()
             self.finished.emit(groups)
         except Exception as e:
@@ -37,26 +192,33 @@ class PDOULoadThread(QThread):
             self.finished.emit([])
 
 
+# ============================================================
+#  Вкладка
+# ============================================================
 class PDOUTab(QWidget):
-    """Вкладка просмотра групп ПДОУ (кружки и секции)"""
+    """Вкладка просмотра групп ПДОУ (кружки и секции)."""
 
     def __init__(self, parent):
         super().__init__()
         self.main_window = parent
-        self.auth = None
+
+        self.current_token = ""      # aupd_token
+        self.current_esztoken = ""   # esztoken
+        self.current_user_name = ""
+        self.current_roles = []
+
         self.all_groups = []
         self.filtered_groups = []
-        self.initUI()
 
-    # ================================================================
-    #  АВТОРИЗАЦИЯ (снаружи)
-    # ================================================================
-    def on_auth_updated(self, auth):
-        self.auth = auth
-        if auth:
-            self.load_btn.setEnabled(True)
-        else:
-            self.load_btn.setEnabled(False)
+        self.token_check_thread = None
+        self.load_thread = None
+
+        # Счётчик сообщений журнала
+        self._log_count = 0
+
+        self.initUI()
+        self._load_saved_token()
+        self._load_saved_cookies()
 
     # ================================================================
     #  UI
@@ -66,13 +228,167 @@ class PDOUTab(QWidget):
         main_layout.setSpacing(10)
         main_layout.setContentsMargins(15, 15, 15, 15)
 
+        # === СВОРАЧИВАЕМЫЙ БЛОК ТОКЕНОВ ===
+        self.token_group = CollapsibleGroupBox(
+            "🔑 Токены ПДОУ (aupd_token + esztoken)", collapsed=True
+        )
+        token_widget = QWidget()
+        token_grid = QGridLayout(token_widget)
+        token_grid.setVerticalSpacing(8)
+        token_grid.setHorizontalSpacing(10)
+        token_grid.setContentsMargins(0, 0, 0, 0)
+
+        # aupd_token
+        token_grid.addWidget(QLabel("aupd_token:"), 0, 0)
+        self.token_edit = QLineEdit()
+        self.token_edit.setPlaceholderText("JWT RS256 (cookie aupd_token)")
+        self.token_edit.setMinimumHeight(34)
+        token_grid.addWidget(self.token_edit, 0, 1)
+
+        self.paste_btn = QPushButton("📋 Из буфера")
+        self.paste_btn.setMaximumWidth(140)
+        self.paste_btn.setMinimumHeight(32)
+        self.paste_btn.clicked.connect(self.on_paste_token)
+        token_grid.addWidget(self.paste_btn, 0, 2)
+
+        # esztoken
+        token_grid.addWidget(QLabel("esztoken:"), 1, 0)
+        self.esztoken_edit = QLineEdit()
+        self.esztoken_edit.setPlaceholderText(
+            "JWT HS256 (Local Storage → eszToken)"
+        )
+        self.esztoken_edit.setMinimumHeight(34)
+        token_grid.addWidget(self.esztoken_edit, 1, 1)
+
+        self.paste_esztoken_btn = QPushButton("📋 Из буфера")
+        self.paste_esztoken_btn.setMaximumWidth(140)
+        self.paste_esztoken_btn.setMinimumHeight(32)
+        self.paste_esztoken_btn.clicked.connect(self.on_paste_esztoken)
+        token_grid.addWidget(self.paste_esztoken_btn, 1, 2)
+
+        # Кнопки действий
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(6)
+
+        self.check_token_btn = QPushButton("🔍 Проверить")
+        self.check_token_btn.setMinimumHeight(32)
+        self.check_token_btn.clicked.connect(self.on_check_token)
+        btn_row.addWidget(self.check_token_btn)
+
+        self.save_token_btn = QPushButton("💾 Сохранить")
+        self.save_token_btn.setMinimumHeight(32)
+        self.save_token_btn.setStyleSheet("""
+            QPushButton { background-color: #059669; color: white;
+                font-weight: bold; border-radius: 6px; }
+            QPushButton:hover { background-color: #047857; }
+        """)
+        self.save_token_btn.clicked.connect(self.on_save_token)
+        btn_row.addWidget(self.save_token_btn)
+
+        self.clear_token_btn = QPushButton("🗑 Очистить")
+        self.clear_token_btn.setMinimumHeight(32)
+        self.clear_token_btn.setStyleSheet("""
+            QPushButton { background-color: #dc2626; color: white;
+                font-weight: bold; border-radius: 6px; }
+            QPushButton:hover { background-color: #b91c1c; }
+        """)
+        self.clear_token_btn.clicked.connect(self.on_clear_token)
+        btn_row.addWidget(self.clear_token_btn)
+
+        btn_row.addStretch()
+        token_grid.addLayout(btn_row, 2, 0, 1, 3)
+
+        self.token_status_label = QLabel("⏳ Токены не заданы")
+        self.token_status_label.setStyleSheet(
+            "color: #666; font-weight: bold; padding: 4px;"
+        )
+        self.token_status_label.setWordWrap(True)
+        token_grid.addWidget(self.token_status_label, 3, 0, 1, 3)
+
+        self.token_group.content_layout().addWidget(token_widget)
+        main_layout.addWidget(self.token_group)
+
+        # === СВОРАЧИВАЕМЫЙ БЛОК COOKIES ===
+        self.cookies_group = CollapsibleGroupBox(
+            "🍪 Cookies ПДОУ", collapsed=True
+        )
+        cookies_widget = QWidget()
+        cookies_layout = QVBoxLayout(cookies_widget)
+        cookies_layout.setContentsMargins(0, 0, 0, 0)
+        cookies_layout.setSpacing(6)
+
+        hint = QLabel(
+            "Вставьте cookies (F12 → Network → любой запрос к esz.mos.ru → "
+            "Request Headers → Cookie:)."
+        )
+        hint.setStyleSheet("color: #666; font-size: 9pt;")
+        hint.setWordWrap(True)
+        cookies_layout.addWidget(hint)
+
+        self.cookies_edit = QPlainTextEdit()
+        self.cookies_edit.setPlaceholderText(
+            "session-cookie=...; Ltpatoken2=...; mos_id=...; ..."
+        )
+        self.cookies_edit.setMaximumHeight(70)
+        self.cookies_edit.setStyleSheet(
+            "font-family: Consolas, monospace; font-size: 9px;"
+        )
+        cookies_layout.addWidget(self.cookies_edit)
+
+        cookies_btn_row = QHBoxLayout()
+        cookies_btn_row.setSpacing(6)
+
+        self.cookies_paste_btn = QPushButton("📋 Из буфера")
+        self.cookies_paste_btn.setMinimumHeight(30)
+        self.cookies_paste_btn.clicked.connect(self.on_cookies_paste)
+        cookies_btn_row.addWidget(self.cookies_paste_btn)
+
+        self.cookies_save_btn = QPushButton("💾 Сохранить cookies")
+        self.cookies_save_btn.setMinimumHeight(30)
+        self.cookies_save_btn.setStyleSheet("""
+            QPushButton { background-color: #0ea5e9; color: white;
+                font-weight: bold; border-radius: 6px; }
+            QPushButton:hover { background-color: #0284c7; }
+        """)
+        self.cookies_save_btn.clicked.connect(self.on_cookies_save)
+        cookies_btn_row.addWidget(self.cookies_save_btn)
+
+        self.cookies_clear_btn = QPushButton("🗑 Очистить")
+        self.cookies_clear_btn.setMinimumHeight(30)
+        self.cookies_clear_btn.setStyleSheet("""
+            QPushButton { background-color: #dc2626; color: white;
+                font-weight: bold; border-radius: 6px; }
+            QPushButton:hover { background-color: #b91c1c; }
+        """)
+        self.cookies_clear_btn.clicked.connect(self.on_cookies_clear)
+        cookies_btn_row.addWidget(self.cookies_clear_btn)
+
+        cookies_btn_row.addStretch()
+        cookies_layout.addLayout(cookies_btn_row)
+
+        self.cookies_status_label = QLabel("⏳ Cookies не заданы")
+        self.cookies_status_label.setStyleSheet(
+            "color: #666; font-weight: bold; padding: 4px;"
+        )
+        self.cookies_status_label.setWordWrap(True)
+        cookies_layout.addWidget(self.cookies_status_label)
+
+        self.cookies_group.content_layout().addWidget(cookies_widget)
+        main_layout.addWidget(self.cookies_group)
+
         # === ПАНЕЛЬ УПРАВЛЕНИЯ ===
         control_group = QGroupBox("Управление")
         control_layout = QHBoxLayout(control_group)
 
         self.load_btn = QPushButton("📋 Загрузить список кружков/ПДОУ")
         self.load_btn.setEnabled(False)
-        self.load_btn.setMinimumHeight(32)
+        self.load_btn.setMinimumHeight(34)
+        self.load_btn.setStyleSheet("""
+            QPushButton { background-color: #2196F3; color: white;
+                font-weight: bold; border-radius: 6px; }
+            QPushButton:hover { background-color: #1976D2; }
+            QPushButton:disabled { background-color: #cccccc; color: #666666; }
+        """)
         self.load_btn.clicked.connect(self.load_groups)
         control_layout.addWidget(self.load_btn)
 
@@ -107,12 +423,13 @@ class PDOUTab(QWidget):
         self.search_edit.textChanged.connect(self.apply_filter)
         filter_layout.addWidget(self.search_edit)
 
-        filter_layout.addWidget(QLabel("Статус группы:"))
+        filter_layout.addWidget(QLabel("Статус:"))
         self.status_filter = QComboBox()
         self.status_filter.addItem("Все", "all")
-        self.status_filter.addItem("Активные", 1)
-        self.status_filter.addItem("Завершённые", 2)
-        self.status_filter.setMinimumWidth(140)
+        self.status_filter.addItem("Активна", 1)
+        self.status_filter.addItem("Идёт обучение", 2)
+        self.status_filter.addItem("Завершена", 3)
+        self.status_filter.setMinimumWidth(160)
         self.status_filter.currentIndexChanged.connect(self.apply_filter)
         filter_layout.addWidget(self.status_filter)
 
@@ -130,19 +447,12 @@ class PDOUTab(QWidget):
         self.groups_table.setSelectionBehavior(
             QTableWidget.SelectionBehavior.SelectRows
         )
-        self.groups_table.setEditTriggers(
-            QTableWidget.EditTrigger.NoEditTriggers
-        )
+        self.groups_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.groups_table.horizontalHeader().setStretchLastSection(True)
-        self.groups_table.setColumnCount(7)
+        self.groups_table.setColumnCount(8)
         self.groups_table.setHorizontalHeaderLabels([
-            "Код",
-            "Название группы",
-            "Педагог",
-            "Программа",
-            "Даты обучения",
-            "Ёмкость",
-            "Записано",
+            "Код", "Название группы", "Педагог", "Программа",
+            "Даты обучения", "Ёмкость", "Записано", "Статус",
         ])
         self.groups_table.verticalHeader().setDefaultSectionSize(50)
         main_layout.addWidget(self.groups_table)
@@ -152,33 +462,335 @@ class PDOUTab(QWidget):
         export_layout.addStretch()
         self.export_btn = QPushButton("📊 Экспорт в Excel")
         self.export_btn.setEnabled(False)
+        self.export_btn.setMinimumHeight(32)
         self.export_btn.clicked.connect(self.export_to_excel)
         export_layout.addWidget(self.export_btn)
         main_layout.addLayout(export_layout)
 
-        # === КОНСОЛЬ ===
+        # === СВОРАЧИВАЕМЫЙ ЖУРНАЛ ===
+        self.log_group = CollapsibleGroupBox("📋 Журнал", collapsed=True)
+
         self.console = QPlainTextEdit()
         self.console.setReadOnly(True)
-        self.console.setMaximumHeight(140)
+        self.console.setMinimumHeight(140)
+        self.console.setMaximumHeight(220)
         self.console.setStyleSheet(
             "font-family: Consolas, monospace; font-size: 10px; "
-            "background-color: #1e1e1e; color: #d4d4d4;"
+            "background-color: #1e1e1e; color: #d4d4d4; "
+            "border-radius: 6px; padding: 6px;"
         )
-        main_layout.addWidget(self.console)
+        self.log_group.content_layout().addWidget(self.console)
+        main_layout.addWidget(self.log_group)
 
+    # ================================================================
+    #  ЛОГ
+    # ================================================================
     def _log(self, text):
-        self.console.appendPlainText(str(text))
+        text = str(text)
+        self.console.appendPlainText(text)
         sb = self.console.verticalScrollBar()
         sb.setValue(sb.maximum())
 
+        # Счётчик в заголовке (виден даже свёрнутым)
+        self._log_count += 1
+        self.log_group.set_status_suffix(f"{self._log_count} стр.")
+
+    def on_auth_updated(self, auth):
+        # ПДОУ работает на своём токене, ЭЖД-сессия не требуется
+        pass
+
     # ================================================================
-    #  ЗАГРУЗКА
+    #  ТОКЕНЫ
     # ================================================================
-    def load_groups(self):
-        if not self.auth:
+    def _load_saved_token(self):
+        data = PDOUToken.load()
+        token = data.get("aupd_token", "")
+        esztoken = data.get("esztoken", "")
+        user_name = data.get("user_name", "")
+        roles = data.get("user_roles", [])
+
+        if token:
+            self.token_edit.setText(token)
+            self.current_token = token
+        if esztoken:
+            self.esztoken_edit.setText(esztoken)
+            self.current_esztoken = esztoken
+
+        if token and esztoken:
+            self.current_user_name = user_name
+            self.current_roles = roles
+            self._update_token_status(True, user_name, roles)
+            self._log(f"[i] Загружены сохранённые токены ({user_name or '?'})")
+        elif token:
+            self._update_token_status(False)
+            self._log("[i] aupd_token загружен, но esztoken отсутствует")
+        else:
+            self._update_token_status(False)
+
+        self._update_load_btn_state()
+
+    def on_paste_token(self):
+        text = QApplication.clipboard().text().strip()
+        text = text.replace("…", "").replace("...", "").strip()
+        if text.startswith("aupd_token="):
+            text = text[len("aupd_token="):].strip()
+        if text:
+            self.token_edit.clear()
+            self.token_edit.setText(text)
+            self._log(f"[clipboard] aupd_token ({len(text)} символов)")
+
+    def on_paste_esztoken(self):
+        text = QApplication.clipboard().text().strip()
+        text = text.replace("…", "").replace("...", "").strip()
+        for prefix in ("eszToken=", "esztoken=", "esztoken: "):
+            if text.startswith(prefix):
+                text = text[len(prefix):].strip()
+                break
+        text = text.strip('"').strip("'")
+        if text:
+            self.esztoken_edit.clear()
+            self.esztoken_edit.setText(text)
+            self._log(f"[clipboard] esztoken ({len(text)} символов)")
+
+    def on_check_token(self):
+        token = self.token_edit.text().strip()
+        esztoken = self.esztoken_edit.text().strip()
+        token = token.replace("…", "").replace("...", "").strip()
+        esztoken = esztoken.replace("…", "").replace("...", "").strip()
+
+        if not token:
+            QMessageBox.warning(self, "Ошибка", "Введите aupd_token.")
+            return
+
+        self.token_edit.setText(token)
+        self.esztoken_edit.setText(esztoken)
+
+        self.check_token_btn.setEnabled(False)
+        self._log("[i] Проверяю токены...")
+
+        self.token_check_thread = PDOUTokenCheckThread(token, esztoken)
+        self.token_check_thread.log.connect(self._log)
+        self.token_check_thread.finished.connect(self._on_token_checked)
+        self.token_check_thread.start()
+
+    def _on_token_checked(self, ok, user_name, roles, reason):
+        self.check_token_btn.setEnabled(True)
+
+        if ok:
+            self.current_token = self.token_edit.text().strip()
+            self.current_esztoken = self.esztoken_edit.text().strip()
+            self.current_user_name = user_name
+            self.current_roles = roles
+            self._update_token_status(True, user_name, roles)
+            self._update_load_btn_state()
+
+            roles_text = "\n".join(f"• {r}" for r in roles) if roles else "(нет)"
+            has_pdou = any(
+                "оператор" in r.lower() or "пдоу" in r.lower() or "круж" in r.lower()
+                for r in roles
+            )
+            if has_pdou:
+                QMessageBox.information(
+                    self, "Проверка успешна",
+                    f"✅ Токены рабочие.\n\nПользователь: {user_name}\n\n"
+                    f"Роли ЕСЗ:\n{roles_text}"
+                )
+            else:
+                QMessageBox.warning(
+                    self, "Нет прав ПДОУ",
+                    f"⚠️ Токены рабочие, но прав на ПДОУ не видно.\n\n"
+                    f"Пользователь: {user_name}\n\nРоли ЕСЗ:\n{roles_text}"
+                )
+        else:
+            self._update_token_status(False)
+            self._update_load_btn_state()
+            self._log(f"[!] {reason}")
+
+            rl = reason.lower()
+            if "«…»" in reason or "обрезан" in rl:
+                QMessageBox.warning(
+                    self, "Токен обрезан",
+                    f"{reason}\n\nСкопируйте полное значение."
+                )
+            elif "401" in reason:
+                QMessageBox.warning(
+                    self, "401 Unauthorized",
+                    f"{reason}\n\n"
+                    "Проверьте: cookies ПДОУ вставлены? Токены не истекли?"
+                )
+            else:
+                QMessageBox.warning(self, "Проверка не удалась", reason)
+
+    def on_save_token(self):
+        token = self.token_edit.text().strip()
+        esztoken = self.esztoken_edit.text().strip()
+        token = token.replace("…", "").replace("...", "").strip()
+        esztoken = esztoken.replace("…", "").replace("...", "").strip()
+
+        if not token:
+            QMessageBox.warning(self, "Ошибка", "Введите aupd_token.")
+            return
+        if not esztoken:
             QMessageBox.warning(
                 self, "Ошибка",
-                "Нет авторизации. Перезапустите приложение."
+                "Введите esztoken (Local Storage → eszToken)."
+            )
+            return
+
+        user_name = self.current_user_name or ""
+        roles = self.current_roles or []
+
+        if PDOUToken.save(token, user_name, roles, esztoken):
+            self.current_token = token
+            self.current_esztoken = esztoken
+            self._update_token_status(True, user_name, roles)
+            self._update_load_btn_state()
+            self._log(f"[+] Токены сохранены ({user_name or 'без имени'})")
+            QMessageBox.information(
+                self, "Готово",
+                f"✅ Токены сохранены.\n\nПользователь: {user_name or 'неизвестен'}"
+            )
+        else:
+            QMessageBox.critical(self, "Ошибка", "Не удалось сохранить.")
+
+    def on_clear_token(self):
+        reply = QMessageBox.question(
+            self, "Очистить токены?",
+            "Удалить сохранённые токены ПДОУ?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        PDOUToken.clear()
+        self.token_edit.clear()
+        self.esztoken_edit.clear()
+        self.current_token = ""
+        self.current_esztoken = ""
+        self.current_user_name = ""
+        self.current_roles = []
+        self._update_token_status(False)
+        self._update_load_btn_state()
+        self._log("[i] Токены удалены")
+
+    def _update_token_status(self, ok, user_name="", roles=None):
+        if ok:
+            roles = roles or []
+            has_pdou = any(
+                "оператор" in r.lower() or "пдоу" in r.lower() or "круж" in r.lower()
+                for r in roles
+            )
+            marker = "✅" if has_pdou else "⚠️"
+            roles_text = ", ".join(roles) if roles else "нет ролей"
+            self.token_status_label.setText(
+                f"{marker} Пользователь: {user_name or 'неизвестен'}\n"
+                f"Роли ЕСЗ: {roles_text}"
+            )
+            color = "#059669" if has_pdou else "#d97706"
+            self.token_status_label.setStyleSheet(
+                f"color: {color}; font-weight: bold; padding: 4px;"
+            )
+            self.token_group.set_status_suffix(f"{marker} {user_name or 'OK'}")
+        else:
+            self.token_status_label.setText("❌ Токены не заданы или не работают")
+            self.token_status_label.setStyleSheet(
+                "color: #dc2626; font-weight: bold; padding: 4px;"
+            )
+            self.token_group.set_status_suffix("❌ не заданы")
+
+    # ================================================================
+    #  COOKIES
+    # ================================================================
+    def _load_saved_cookies(self):
+        cookies = PDOUCookies.load()
+        if cookies:
+            self._log(f"[i] Загружено cookies: {len(cookies)}")
+            self._update_cookies_status(True, list(cookies.keys()))
+        else:
+            self._update_cookies_status(False)
+
+    def on_cookies_paste(self):
+        text = QApplication.clipboard().text().strip()
+        if text:
+            self.cookies_edit.setPlainText(text)
+            self._log(f"[clipboard] Cookies вставлены ({len(text)} символов)")
+
+    def on_cookies_save(self):
+        text = self.cookies_edit.toPlainText().strip()
+        if not text:
+            QMessageBox.warning(self, "Ошибка", "Вставьте cookies.")
+            return
+
+        cookies = PDOUCookies.parse_cookie_string(text)
+        if not cookies:
+            QMessageBox.warning(
+                self, "Ошибка",
+                "Не удалось разобрать cookies.\nФормат: name1=value1; name2=value2"
+            )
+            return
+
+        if PDOUCookies.save(cookies):
+            self._log(f"[+] Сохранено {len(cookies)} cookies")
+            self._update_cookies_status(True, list(cookies.keys()))
+            self._update_load_btn_state()
+
+            has_ltpa = "Ltpatoken2" in cookies
+            msg = f"✅ Сохранено cookies: {len(cookies)}"
+            if not has_ltpa:
+                msg += ("\n\n⚠️ Ltpatoken2 отсутствует. "
+                        "Для чтения групп это не критично, но для других "
+                        "операций (заявления) он нужен.")
+            QMessageBox.information(self, "Готово", msg)
+        else:
+            QMessageBox.critical(self, "Ошибка", "Не удалось сохранить cookies.")
+
+    def on_cookies_clear(self):
+        reply = QMessageBox.question(
+            self, "Очистить cookies?",
+            "Удалить сохранённые cookies ПДОУ?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        PDOUCookies.clear()
+        self.cookies_edit.clear()
+        self._update_cookies_status(False)
+        self._update_load_btn_state()
+        self._log("[i] Cookies очищены")
+
+    def _update_cookies_status(self, ok, keys=None):
+        if ok and keys:
+            has_ltpa = "Ltpatoken2" in keys
+            marker = "✅" if has_ltpa else "⚠️"
+            self.cookies_status_label.setText(
+                f"{marker} Cookies: {len(keys)}\n"
+                f"Ключи: {', '.join(keys[:6])}..."
+            )
+            color = "#059669" if has_ltpa else "#d97706"
+            self.cookies_status_label.setStyleSheet(
+                f"color: {color}; font-weight: bold; padding: 4px;"
+            )
+            self.cookies_group.set_status_suffix(f"{marker} {len(keys)} шт.")
+        else:
+            self.cookies_status_label.setText("❌ Cookies не заданы")
+            self.cookies_status_label.setStyleSheet(
+                "color: #dc2626; font-weight: bold; padding: 4px;"
+            )
+            self.cookies_group.set_status_suffix("❌ не заданы")
+
+    # ================================================================
+    #  ЗАГРУЗКА ГРУПП
+    # ================================================================
+    def _update_load_btn_state(self):
+        has_token = bool(self.current_token)
+        has_esztoken = bool(self.current_esztoken)
+        self.load_btn.setEnabled(has_token and has_esztoken)
+
+    def load_groups(self):
+        if not self.current_token or not self.current_esztoken:
+            self.token_group.set_collapsed(False)
+            QMessageBox.warning(
+                self, "Ошибка",
+                "Введите и сохраните оба токена (aupd_token и esztoken)."
             )
             return
 
@@ -189,8 +801,12 @@ class PDOUTab(QWidget):
         self.groups_table.setRowCount(0)
         self.all_groups = []
         self.console.clear()
+        self._log_count = 0
+        self.log_group.set_status_suffix("0 стр.")
 
-        self.load_thread = PDOULoadThread(self.auth)
+        self.load_thread = PDOULoadThread(
+            self.current_token, self.current_esztoken
+        )
         self.load_thread.finished.connect(self.on_load_finished)
         self.load_thread.error.connect(self.on_load_error)
         self.load_thread.log_message.connect(self._log)
@@ -204,8 +820,7 @@ class PDOUTab(QWidget):
         if not groups:
             QMessageBox.warning(
                 self, "Внимание",
-                "Не удалось получить список групп ПДОУ.\n"
-                "Подробности в консоли ниже."
+                "Не удалось получить группы. Подробности в журнале."
             )
             return
 
@@ -215,8 +830,7 @@ class PDOUTab(QWidget):
         self.export_btn.setEnabled(True)
 
         QMessageBox.information(
-            self, "Готово",
-            f"✅ Загружено групп: {len(groups)}"
+            self, "Готово", f"✅ Загружено групп: {len(groups)}"
         )
 
     def on_load_error(self, error):
@@ -230,16 +844,12 @@ class PDOUTab(QWidget):
     # ================================================================
     def update_stats(self):
         total = len(self.all_groups)
-        active = sum(
-            1 for g in self.all_groups
-            if g.get("serviceClassStatus") == 1
-        )
-        done = sum(
-            1 for g in self.all_groups
-            if g.get("serviceClassStatus") == 2
-        )
+        active = sum(1 for g in self.all_groups if g.get("serviceClassStatus") == 1)
+        running = sum(1 for g in self.all_groups if g.get("serviceClassStatus") == 2)
+        done = sum(1 for g in self.all_groups if g.get("serviceClassStatus") == 3)
         self.stats_label.setText(
-            f"Всего: {total} | Активных: {active} | Завершённых: {done}"
+            f"Всего: {total} | Активных: {active} | "
+            f"Идёт обучение: {running} | Завершено: {done}"
         )
 
     def apply_filter(self):
@@ -257,11 +867,9 @@ class PDOUTab(QWidget):
                 ]).lower()
                 if search_text not in haystack:
                     continue
-
             if status_filter != "all":
                 if g.get("serviceClassStatus") != status_filter:
                     continue
-
             filtered.append(g)
 
         self.filtered_groups = filtered
@@ -281,6 +889,7 @@ class PDOUTab(QWidget):
         self.groups_table.setRowCount(len(groups))
 
         green_bg = QColor(220, 255, 220)
+        blue_bg = QColor(220, 235, 255)
         gray_bg = QColor(240, 240, 240)
 
         for i, g in enumerate(groups):
@@ -288,53 +897,55 @@ class PDOUTab(QWidget):
             if status == 1:
                 row_color = green_bg
             elif status == 2:
+                row_color = blue_bg
+            elif status == 3:
                 row_color = gray_bg
             else:
                 row_color = None
 
-            def make_item(text, align=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter):
+            def make_item(text, align=Qt.AlignmentFlag.AlignLeft
+                          | Qt.AlignmentFlag.AlignVCenter):
                 it = QTableWidgetItem(str(text) if text is not None else "")
                 it.setTextAlignment(align)
                 if row_color:
                     it.setBackground(row_color)
                 return it
 
-            # 0: Код
-            self.groups_table.setItem(i, 0, make_item(g.get("code", ""), Qt.AlignmentFlag.AlignCenter))
-
-            # 1: Название группы
-            name_item = make_item(g.get("name", "").strip())
-            name_item.setToolTip(f"ID группы: {g.get('id')}")
+            self.groups_table.setItem(
+                i, 0, make_item(g.get("code", ""), Qt.AlignmentFlag.AlignCenter)
+            )
+            name_item = make_item((g.get("name", "") or "").strip())
+            name_item.setToolTip(f"ID: {g.get('id')}")
             self.groups_table.setItem(i, 1, name_item)
-
-            # 2: Педагог
             self.groups_table.setItem(i, 2, make_item(g.get("supervisorPerson", "")))
-
-            # 3: Программа
-            prog_item = make_item(g.get("serviceName", "").strip())
+            prog_item = make_item((g.get("serviceName", "") or "").strip())
             prog_item.setToolTip(f"serviceId: {g.get('serviceId')}")
             self.groups_table.setItem(i, 3, prog_item)
-
-            # 4: Даты обучения
-            self.groups_table.setItem(i, 4, make_item(g.get("trainDates", ""), Qt.AlignmentFlag.AlignCenter))
-
-            # 5: Ёмкость
-            self.groups_table.setItem(i, 5, make_item(g.get("capacity", 0), Qt.AlignmentFlag.AlignCenter))
-
-            # 6: Записано
-            self.groups_table.setItem(i, 6, make_item(g.get("included", 0), Qt.AlignmentFlag.AlignCenter))
+            self.groups_table.setItem(
+                i, 4, make_item(g.get("trainDates", ""), Qt.AlignmentFlag.AlignCenter)
+            )
+            self.groups_table.setItem(
+                i, 5, make_item(g.get("capacity", 0), Qt.AlignmentFlag.AlignCenter)
+            )
+            self.groups_table.setItem(
+                i, 6, make_item(g.get("included", 0), Qt.AlignmentFlag.AlignCenter)
+            )
+            status_text = PDOUCollector.get_status_text(status)
+            self.groups_table.setItem(
+                i, 7, make_item(status_text, Qt.AlignmentFlag.AlignCenter)
+            )
 
         self.groups_table.setUpdatesEnabled(True)
         self.groups_table.setSortingEnabled(True)
 
-        # Ширины колонок
-        self.groups_table.setColumnWidth(0, 90)
+        self.groups_table.setColumnWidth(0, 100)
         self.groups_table.setColumnWidth(1, 280)
         self.groups_table.setColumnWidth(2, 220)
         self.groups_table.setColumnWidth(3, 320)
         self.groups_table.setColumnWidth(4, 190)
         self.groups_table.setColumnWidth(5, 90)
         self.groups_table.setColumnWidth(6, 90)
+        self.groups_table.setColumnWidth(7, 130)
 
     # ================================================================
     #  ЭКСПОРТ
@@ -365,20 +976,17 @@ class PDOUTab(QWidget):
             ws = wb.active
             ws.title = "Кружки ПДОУ"
 
-            headers = [
-                "Код", "Название группы", "Педагог", "Программа",
-                "Даты обучения", "Ёмкость", "Записано", "Статус"
-            ]
+            headers = ["Код", "Название группы", "Педагог", "Программа",
+                       "Даты обучения", "Ёмкость", "Записано", "Статус"]
             ws.append(headers)
 
             header_font = Font(bold=True, color="FFFFFF", size=11)
             header_fill = PatternFill(
-                start_color="2C3E50", end_color="2C3E50", fill_type="solid"
+                start_color="8b5cf6", end_color="8b5cf6", fill_type="solid"
             )
             header_alignment = Alignment(
                 horizontal="center", vertical="center", wrap_text=True
             )
-
             for col in range(1, len(headers) + 1):
                 c = ws.cell(row=1, column=col)
                 c.font = header_font
@@ -386,47 +994,36 @@ class PDOUTab(QWidget):
                 c.alignment = header_alignment
 
             for g in self.filtered_groups:
-                status_code = g.get("serviceClassStatus")
-                if status_code == 1:
-                    status_text = "Активна"
-                elif status_code == 2:
-                    status_text = "Завершена"
-                else:
-                    status_text = str(status_code or "")
-
+                status_text = PDOUCollector.get_status_text(
+                    g.get("serviceClassStatus")
+                )
                 ws.append([
                     g.get("code", ""),
-                    g.get("name", "").strip(),
+                    (g.get("name", "") or "").strip(),
                     g.get("supervisorPerson", ""),
-                    g.get("serviceName", "").strip(),
+                    (g.get("serviceName", "") or "").strip(),
                     g.get("trainDates", ""),
                     g.get("capacity", 0),
                     g.get("included", 0),
                     status_text,
                 ])
 
-            col_widths = {
-                "A": 12, "B": 40, "C": 28, "D": 45,
-                "E": 24, "F": 10, "G": 10, "H": 14,
-            }
+            col_widths = {"A": 12, "B": 40, "C": 28, "D": 45,
+                          "E": 24, "F": 10, "G": 10, "H": 16}
             for col_letter, width in col_widths.items():
                 ws.column_dimensions[col_letter].width = width
 
             ws.auto_filter.ref = ws.dimensions
             ws.freeze_panes = "A2"
-
             wb.save(file_path)
 
             reply = QMessageBox.question(
                 self, "Готово",
-                f"Отчёт сохранён:\n{file_path}\n\nОткрыть файл?",
+                f"Отчёт сохранён:\n{file_path}\n\nОткрыть?",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             )
             if reply == QMessageBox.StandardButton.Yes:
                 os.startfile(file_path)
 
         except Exception as e:
-            QMessageBox.critical(
-                self, "Ошибка",
-                f"Не удалось сохранить отчёт:\n{e}"
-            )
+            QMessageBox.critical(self, "Ошибка", f"Не удалось сохранить:\n{e}")
