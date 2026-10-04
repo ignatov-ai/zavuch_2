@@ -1,15 +1,13 @@
 # -*- coding: utf-8 -*-
 """
 Диалоги импорта токенов/сессий.
-
 Содержит:
-  • TokenCheckWorker   — проверка ЭЖД auth_token (ручной ввод).
-  • EJDImportWorker    — импорт ЭЖД из ejd_session.json / auth_data.json / ejd_cookies.json.
-  • PDOUImportWorker   — импорт ПДОУ из pdou_session.json.
-
-  • TokenImportDialog  — диалог ручного ввода ЭЖД auth_token.
-  • EJDImportDialog    — диалог импорта ЭЖД-сессии из JSON.
-  • PDOUImportDialog   — диалог импорта ПДОУ-сессии из JSON.
+• TokenCheckWorker   — проверка ЭЖД auth_token (ручной ввод).
+• EJDImportWorker    — импорт ЭЖД из ejd_session.json / auth_data.json / ejd_cookies.json.
+• PDOUImportWorker   — импорт ПДОУ из pdou_session.json.
+• TokenImportDialog  — диалог ручного ввода ЭЖД auth_token.
+• EJDImportDialog    — диалог импорта ЭЖД-сессии из JSON.
+• PDOUImportDialog   — диалог импорта ПДОУ-сессии из JSON.
 """
 import base64
 import datetime
@@ -17,16 +15,13 @@ import json
 import pickle
 from http.cookiejar import Cookie, CookieJar
 from pathlib import Path
-
 import requests
-
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
     QPushButton, QPlainTextEdit, QMessageBox, QFormLayout,
-    QFileDialog
+    QFileDialog, QFrame,
 )
-
 from paths import (
     SESSIONS_DIR,
     SESSION_FILE,
@@ -36,6 +31,9 @@ from paths import (
 )
 
 
+# ============================================================
+# Утилиты
+# ============================================================
 def decode_jwt_payload(token: str) -> dict:
     try:
         parts = token.split(".")
@@ -88,7 +86,6 @@ def _safe_pickle_jar(cj):
                 "expires": c.expires,
             })
     except Exception:
-        # Fallback: пытаемся через dict_from_cookiejar
         try:
             for name, value in requests.utils.dict_from_cookiejar(cj).items():
                 cookies_list.append({
@@ -102,7 +99,142 @@ def _safe_pickle_jar(cj):
 
 
 # ============================================================
-#  ЭЖД: проверка ручного токена
+# Единые стили диалогов
+# ============================================================
+DIALOG_STYLE = """
+    QDialog {
+        background-color: #ffffff;
+    }
+    QWidget {
+        font-size: 10pt;
+        color: #1e293b;
+    }
+    QLabel {
+        color: #334155;
+    }
+    QLineEdit {
+        min-height: 32px;
+        padding: 2px 10px;
+        border: 1px solid #cbd5e1;
+        border-radius: 5px;
+        background: #ffffff;
+        color: #1e293b;
+    }
+    QLineEdit:focus {
+        border: 1px solid #3b82f6;
+    }
+    QLineEdit:disabled {
+        background: #f1f5f9;
+        color: #94a3b8;
+    }
+    QPushButton {
+        min-height: 32px;
+        padding: 4px 14px;
+        border: 1px solid #cbd5e1;
+        border-radius: 5px;
+        background: #f8fafc;
+        color: #1e293b;
+        font-weight: 500;
+    }
+    QPushButton:hover {
+        background: #e2e8f0;
+    }
+    QPushButton:pressed {
+        background: #cbd5e1;
+    }
+    QPushButton:disabled {
+        background: #f1f5f9;
+        color: #94a3b8;
+        border-color: #e2e8f0;
+    }
+    QPlainTextEdit {
+        font-family: Consolas, "Courier New", monospace;
+        font-size: 9.5pt;
+    }
+"""
+
+# === ЭЖД-акцент (синий) ===
+PRIMARY_EJD_BTN = """
+    QPushButton {
+        background-color: #1d4ed8;
+        color: #ffffff;
+        font-weight: 700;
+        border: none;
+        border-radius: 7px;
+    }
+    QPushButton:hover { background-color: #1e40af; }
+    QPushButton:pressed { background-color: #1e3a8a; }
+    QPushButton:disabled {
+        background-color: #cbd5e1;
+        color: #64748b;
+    }
+"""
+
+# === ПДОУ-акцент (фиолетовый) ===
+PRIMARY_PDOU_BTN = """
+    QPushButton {
+        background-color: #7c3aed;
+        color: #ffffff;
+        font-weight: 700;
+        border: none;
+        border-radius: 7px;
+    }
+    QPushButton:hover { background-color: #6d28d9; }
+    QPushButton:pressed { background-color: #5b21b6; }
+    QPushButton:disabled {
+        background-color: #cbd5e1;
+        color: #64748b;
+    }
+"""
+
+SUCCESS_BTN = """
+    QPushButton {
+        background-color: #059669;
+        color: #ffffff;
+        font-weight: 600;
+        border: none;
+        border-radius: 6px;
+    }
+    QPushButton:hover { background-color: #047857; }
+    QPushButton:disabled {
+        background-color: #cbd5e1;
+        color: #64748b;
+    }
+"""
+
+GHOST_BTN = """
+    QPushButton {
+        background: #eff6ff;
+        color: #1d4ed8;
+        border: 1px solid #bfdbfe;
+        font-weight: 600;
+    }
+    QPushButton:hover { background: #dbeafe; }
+"""
+
+GHOST_PDOU_BTN = """
+    QPushButton {
+        background: #f5f3ff;
+        color: #7c3aed;
+        border: 1px solid #ddd6fe;
+        font-weight: 600;
+    }
+    QPushButton:hover { background: #ede9fe; }
+"""
+
+DANGER_BTN = """
+    QPushButton {
+        background-color: #fff1f2;
+        color: #be123c;
+        border: 1px solid #fecdd3;
+        font-weight: 600;
+    }
+    QPushButton:hover { background-color: #ffe4e6; }
+"""
+
+
+# ============================================================
+# ЭЖД: проверка ручного токена
 # ============================================================
 class TokenCheckWorker(QThread):
     log = Signal(str)
@@ -120,12 +252,13 @@ class TokenCheckWorker(QThread):
 
     def run(self):
         result = {"ok": False, "school": "", "reason": "", "saved": False}
-
         session = requests.Session()
         session.headers.update({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                          "AppleWebKit/537.36 (KHTML, like Gecko) "
-                          "Chrome/152.0.0.0 Safari/537.36",
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/152.0.0.0 Safari/537.36"
+            ),
             "Accept": "application/json, text/plain, */*",
             "Auth-Token": self.auth_token,
             "Authorization": f"Bearer {self.auth_token}",
@@ -141,7 +274,7 @@ class TokenCheckWorker(QThread):
                 cj.set_cookie(_build_cookie("aupd_token", self.aupd_token, domain))
         if self.profile_id:
             cj.set_cookie(_build_cookie("profile_id", self.profile_id,
-                                         "dnevnik.mos.ru"))
+                                        "dnevnik.mos.ru"))
         for c in cj:
             session.cookies.set_cookie(c)
 
@@ -199,7 +332,7 @@ class TokenCheckWorker(QThread):
 
 
 # ============================================================
-#  ЭЖД: импорт из JSON
+# ЭЖД: импорт из JSON
 # ============================================================
 class EJDImportWorker(QThread):
     log = Signal(str)
@@ -215,7 +348,6 @@ class EJDImportWorker(QThread):
 
     def run(self):
         result = {"ok": False, "school": "", "reason": "", "saved": False}
-
         try:
             data = json.loads(self.raw_json)
         except Exception as e:
@@ -238,7 +370,6 @@ class EJDImportWorker(QThread):
             self.done.emit(result)
             return
 
-        # Cookies: либо в data["cookies"], либо плоско
         cookies = data.get("cookies")
         if not isinstance(cookies, dict) or not cookies:
             SYSTEM_KEYS = {
@@ -269,7 +400,6 @@ class EJDImportWorker(QThread):
         self._log(f"[i] cookies:    {len(cookies)} шт.")
 
         cj = CookieJar()
-
         for name, value in cookies.items():
             if not name or value is None:
                 continue
@@ -286,15 +416,16 @@ class EJDImportWorker(QThread):
                 cj.set_cookie(_build_cookie("aupd_token", aupd_token, domain))
         if profile_id:
             cj.set_cookie(_build_cookie("profile_id", profile_id,
-                                         "dnevnik.mos.ru"))
+                                        "dnevnik.mos.ru"))
 
         self._log("[i] Проверяю через dnevnik.mos.ru/core/api/schools...")
-
         session = requests.Session()
         session.headers.update({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                          "AppleWebKit/537.36 (KHTML, like Gecko) "
-                          "Chrome/152.0.0.0 Safari/537.36",
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/152.0.0.0 Safari/537.36"
+            ),
             "Accept": "application/json, text/plain, */*",
         })
         for c in cj:
@@ -333,7 +464,6 @@ class EJDImportWorker(QThread):
         school_name = schools[0].get("name", "?")
         sid = str(schools[0].get("id", "") or school_id or "")
         self._log(f"[+] Токен принят. Школа: {school_name}")
-
         result["ok"] = True
         result["school"] = school_name
 
@@ -342,10 +472,8 @@ class EJDImportWorker(QThread):
                 clean_jar = CookieJar()
                 for c in cj:
                     clean_jar.set_cookie(c)
-
                 with open(SESSION_FILE, "wb") as f:
                     pickle.dump(clean_jar, f)
-
                 with open(AUTH_DATA_FILE, "w", encoding="utf-8") as f:
                     json.dump({
                         "auth_token": auth_token,
@@ -353,7 +481,6 @@ class EJDImportWorker(QThread):
                         "profile_id": profile_id,
                         "school_id": sid,
                     }, f, ensure_ascii=False, indent=2)
-
                 self._log(f"[+] Сохранено: {SESSION_FILE}")
                 self._log(f"[+] Сохранено: {AUTH_DATA_FILE}")
                 result["saved"] = True
@@ -365,12 +492,11 @@ class EJDImportWorker(QThread):
 
 
 # ============================================================
-#  ПДОУ: импорт
+# ПДОУ: импорт
 # ============================================================
 class PDOUImportWorker(QThread):
     log = Signal(str)
     done = Signal(dict)
-
     USER_URL = ("https://esz.mos.ru/Services/"
                 "AuthorizationService/User/CurrentUser")
 
@@ -387,7 +513,6 @@ class PDOUImportWorker(QThread):
             "ok": False, "user_name": "", "roles": [],
             "reason": "", "saved": False,
         }
-
         try:
             data = json.loads(self.raw_json)
         except Exception as e:
@@ -431,9 +556,11 @@ class PDOUImportWorker(QThread):
 
         session = requests.Session()
         session.headers.update({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                          "AppleWebKit/537.36 (KHTML, like Gecko) "
-                          "Chrome/154.0.0.0 Safari/537.36",
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/154.0.0.0 Safari/537.36"
+            ),
             "Accept": "application/json",
             "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
             "Origin": "https://esz.mos.ru",
@@ -449,7 +576,6 @@ class PDOUImportWorker(QThread):
                 session.cookies.set(name, str(value), domain=".mos.ru")
             except Exception:
                 pass
-
         if has_ltpa:
             session.headers["LtpaToken2"] = cookies["Ltpatoken2"]
 
@@ -475,7 +601,6 @@ class PDOUImportWorker(QThread):
 
         user_name = (data.get("user_name") or "").strip()
         roles = data.get("user_roles") or []
-
         if not user_name:
             user_name = user.get("userName") or user.get("login") or ""
             full = user.get("fullName") or {}
@@ -486,7 +611,6 @@ class PDOUImportWorker(QThread):
                     full.get("middleName", ""),
                 ]
                 user_name = " ".join(p for p in parts if p) or user_name
-
         if not roles:
             roles = []
             for role in (user.get("roles") or []):
@@ -510,7 +634,9 @@ class PDOUImportWorker(QThread):
                         "esztoken": esztoken,
                         "user_name": user_name,
                         "user_roles": roles,
-                        "saved_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "saved_at": datetime.datetime.now().strftime(
+                            "%Y-%m-%d %H:%M:%S"
+                        ),
                         "source": "browser_console",
                     }, f, ensure_ascii=False, indent=2)
                 with open(PDOU_COOKIES_FILE, "w", encoding="utf-8") as f:
@@ -526,123 +652,214 @@ class PDOUImportWorker(QThread):
 
 
 # ============================================================
-#  Диалог ЭЖД (ручной ввод)
+# Базовый диалог импорта (общий каркас)
 # ============================================================
-class TokenImportDialog(QDialog):
+class _BaseImportDialog(QDialog):
+    """Базовый класс для диалогов импорта. Задаёт единый стиль."""
     tokens_saved = Signal(object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("📋 Импорт ЭЖД-токенов")
-        self.setMinimumSize(720, 620)
         self.worker = None
+        self._apply_dialog_style()
+
+    def _apply_dialog_style(self):
+        self.setStyleSheet(DIALOG_STYLE)
+
+    def _make_title(self, text: str, size_pt: int = 16) -> QLabel:
+        lbl = QLabel(text)
+        lbl.setStyleSheet(
+            f"font-size: {size_pt}pt; font-weight: 700; "
+            f"color: #0f172a; padding: 2px 0 4px 0;"
+        )
+        return lbl
+
+    def _make_subtitle(self, text: str) -> QLabel:
+        lbl = QLabel(text)
+        lbl.setWordWrap(True)
+        lbl.setStyleSheet("color: #64748b; margin-bottom: 4px;")
+        return lbl
+
+    def _make_hint(self, text: str, color: str = "#475569",
+                   bg: str = "#f8fafc", border: str = "#e2e8f0") -> QLabel:
+        lbl = QLabel(text)
+        lbl.setWordWrap(True)
+        lbl.setStyleSheet(f"""
+            color: {color};
+            background-color: {bg};
+            border: 1px solid {border};
+            padding: 10px;
+            border-radius: 6px;
+            font-size: 9.5pt;
+        """)
+        return lbl
+
+    def _make_warning(self, text: str) -> QLabel:
+        return self._make_hint(
+            text,
+            color="#b45309",
+            bg="#fffbeb",
+            border="#fde68a",
+        )
+
+    def _make_log_view(self) -> QPlainTextEdit:
+        view = QPlainTextEdit()
+        view.setReadOnly(True)
+        view.setMaximumBlockCount(3000)
+        view.setMinimumHeight(140)
+        view.setStyleSheet("""
+            QPlainTextEdit {
+                font-family: Consolas, "Courier New", monospace;
+                font-size: 9.5pt;
+                background-color: #0f172a;
+                color: #e2e8f0;
+                border: 1px solid #334155;
+                border-radius: 6px;
+                padding: 6px;
+                selection-background-color: #1e40af;
+                selection-color: #ffffff;
+            }
+        """)
+        return view
+
+    def _make_separator(self) -> QFrame:
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet(
+            "color: #e2e8f0; background: #e2e8f0; max-height: 1px;"
+        )
+        return sep
+
+    def append_log(self, msg):
+        self.log_view.appendPlainText(msg)
+        sb = self.log_view.verticalScrollBar()
+        sb.setValue(sb.maximum())
+
+
+# ============================================================
+# Диалог ЭЖД (ручной ввод)
+# ============================================================
+class TokenImportDialog(_BaseImportDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("📋  Импорт ЭЖД-токенов")
+        self.setMinimumSize(760, 660)
         self.last_auth_obj = None
         self._build_ui()
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 20)
-        layout.setSpacing(10)
+        layout.setSpacing(12)
 
-        title = QLabel("📋 Импорт токенов ЭЖД")
-        title.setStyleSheet("font-size: 16pt; font-weight: bold;")
-        layout.addWidget(title)
+        # === Заголовок ===
+        layout.addWidget(self._make_title("📋  Импорт токенов ЭЖД"))
+        layout.addWidget(self._make_subtitle(
+            "Ручной ввод auth_token из DevTools браузера."
+        ))
 
-        hint = QLabel(
+        # === Подсказка ===
+        hint = self._make_hint(
             "Откройте Chrome DevTools (F12) на dnevnik.mos.ru:\n"
-            "Application → Cookies → https://dnevnik.mos.ru\n"
+            "  Application → Cookies → https://dnevnik.mos.ru\n"
             "Скопируйте значения полей auth_token и (опционально) aupd_token."
         )
-        hint.setStyleSheet("color: #555; font-size: 9pt; background-color: #f5f5f5; "
-                           "padding: 8px; border-radius: 5px;")
-        hint.setWordWrap(True)
         layout.addWidget(hint)
 
+        # === Форма полей ===
         form = QFormLayout()
-        form.setSpacing(8)
-        form.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        form.setSpacing(10)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight
+                               | Qt.AlignmentFlag.AlignVCenter)
 
+        # auth_token
         self.auth_token_edit = QLineEdit()
         self.auth_token_edit.setPlaceholderText("auth_token (JWT)")
-        self.auth_token_edit.setMinimumHeight(34)
         self.auth_token_edit.textChanged.connect(self._on_token_changed)
         auth_row = QHBoxLayout()
+        auth_row.setSpacing(6)
         auth_row.addWidget(self.auth_token_edit, 1)
         b = QPushButton("📋 Из буфера")
-        b.setMaximumWidth(130)
+        b.setStyleSheet(GHOST_BTN)
+        b.setMaximumWidth(140)
         b.clicked.connect(lambda: self._paste_into(self.auth_token_edit))
         auth_row.addWidget(b)
-        form.addRow("auth_token:", auth_row)
+        form.addRow(self._form_label("auth_token:"), auth_row)
 
+        # aupd_token
         self.aupd_token_edit = QLineEdit()
         self.aupd_token_edit.setPlaceholderText("aupd_token (необязательно)")
-        self.aupd_token_edit.setMinimumHeight(34)
         aupd_row = QHBoxLayout()
+        aupd_row.setSpacing(6)
         aupd_row.addWidget(self.aupd_token_edit, 1)
         b = QPushButton("📋 Из буфера")
-        b.setMaximumWidth(130)
+        b.setStyleSheet(GHOST_BTN)
+        b.setMaximumWidth(140)
         b.clicked.connect(lambda: self._paste_into(self.aupd_token_edit))
         aupd_row.addWidget(b)
-        form.addRow("aupd_token:", aupd_row)
+        form.addRow(self._form_label("aupd_token:"), aupd_row)
 
+        # profile_id
         self.profile_id_edit = QLineEdit()
         self.profile_id_edit.setPlaceholderText("profile_id (опционально)")
-        self.profile_id_edit.setMinimumHeight(34)
         pid_row = QHBoxLayout()
+        pid_row.setSpacing(6)
         pid_row.addWidget(self.profile_id_edit, 1)
         b = QPushButton("📋 Из буфера")
-        b.setMaximumWidth(130)
+        b.setStyleSheet(GHOST_BTN)
+        b.setMaximumWidth(140)
         b.clicked.connect(lambda: self._paste_into(self.profile_id_edit))
         pid_row.addWidget(b)
-        form.addRow("profile_id:", pid_row)
+        form.addRow(self._form_label("profile_id:"), pid_row)
 
         layout.addLayout(form)
 
+        # === Кнопки действий ===
         btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
         btn_row.addStretch()
 
-        self.check_btn = QPushButton("🔍 Проверить")
-        self.check_btn.setMinimumHeight(36)
-        self.check_btn.setMinimumWidth(150)
-        self.check_btn.setStyleSheet("""
-            QPushButton { background-color: #2563eb; color: white;
-                font-weight: bold; border-radius: 8px; }
-            QPushButton:hover { background-color: #1d4ed8; }
-            QPushButton:disabled { background-color: #cccccc; color: #666666; }
-        """)
+        self.check_btn = QPushButton("🔍  Проверить")
+        self.check_btn.setMinimumHeight(38)
+        self.check_btn.setMinimumWidth(160)
+        self.check_btn.setStyleSheet(GHOST_BTN)
         self.check_btn.clicked.connect(lambda: self._start_worker(save=False))
         btn_row.addWidget(self.check_btn)
 
-        self.save_btn = QPushButton("💾 Сохранить")
-        self.save_btn.setMinimumHeight(36)
-        self.save_btn.setMinimumWidth(150)
+        self.save_btn = QPushButton("💾  Сохранить")
+        self.save_btn.setMinimumHeight(38)
+        self.save_btn.setMinimumWidth(160)
         self.save_btn.setEnabled(False)
-        self.save_btn.setStyleSheet("""
-            QPushButton { background-color: #059669; color: white;
-                font-weight: bold; border-radius: 8px; }
-            QPushButton:hover { background-color: #047857; }
-            QPushButton:disabled { background-color: #cccccc; color: #666666; }
-        """)
+        self.save_btn.setStyleSheet(SUCCESS_BTN)
         self.save_btn.clicked.connect(lambda: self._start_worker(save=True))
         btn_row.addWidget(self.save_btn)
 
         self.close_btn = QPushButton("Закрыть")
-        self.close_btn.setMinimumHeight(36)
-        self.close_btn.setMinimumWidth(100)
+        self.close_btn.setMinimumHeight(38)
+        self.close_btn.setMinimumWidth(110)
         self.close_btn.clicked.connect(self.reject)
         btn_row.addWidget(self.close_btn)
-
         layout.addLayout(btn_row)
-        layout.addWidget(QLabel("Журнал:"))
 
-        self.log_view = QPlainTextEdit()
-        self.log_view.setReadOnly(True)
-        self.log_view.setMaximumBlockCount(3000)
-        self.log_view.setStyleSheet(
-            "font-family: Consolas, monospace; font-size: 10px; "
-            "background-color: #1e1e1e; color: #d4d4d4;"
+        # === Разделитель ===
+        layout.addWidget(self._make_separator())
+
+        # === Журнал ===
+        log_title = QLabel("📋  Журнал")
+        log_title.setStyleSheet(
+            "font-size: 11pt; font-weight: 700; color: #0369a1;"
         )
+        layout.addWidget(log_title)
+
+        self.log_view = self._make_log_view()
         layout.addWidget(self.log_view, 1)
+
+    def _form_label(self, text: str) -> QLabel:
+        lbl = QLabel(text)
+        lbl.setStyleSheet(
+            "font-weight: 600; color: #334155; padding-right: 4px;"
+        )
+        return lbl
 
     def _paste_into(self, line_edit):
         text = get_from_clipboard()
@@ -655,11 +872,6 @@ class TokenImportDialog(QDialog):
         self.check_btn.setEnabled(has)
         self.save_btn.setEnabled(False)
 
-    def append_log(self, msg):
-        self.log_view.appendPlainText(msg)
-        sb = self.log_view.verticalScrollBar()
-        sb.setValue(sb.maximum())
-
     def _start_worker(self, save):
         auth_token = self.auth_token_edit.text().strip()
         if not auth_token or len(auth_token) < 50:
@@ -670,11 +882,13 @@ class TokenImportDialog(QDialog):
 
         self._set_ui_enabled(False)
         self.append_log("=" * 50)
-        self.append_log(f"[i] {'Сохранение' if save else 'Проверка'}...")
-
-        self.worker = TokenCheckWorker(auth_token=auth_token,
-                                       aupd_token=aupd,
-                                       profile_id=pid, save=save)
+        self.append_log(
+            f"[i] {'Сохранение' if save else 'Проверка'}..."
+        )
+        self.worker = TokenCheckWorker(
+            auth_token=auth_token, aupd_token=aupd,
+            profile_id=pid, save=save,
+        )
         self.worker.log.connect(self.append_log)
         self.worker.done.connect(self._on_done)
         self.worker.start()
@@ -689,8 +903,11 @@ class TokenImportDialog(QDialog):
                     auth = dn_Auth()
                     if auth.load_session():
                         self.last_auth_obj = auth
-                        QMessageBox.information(self, "Готово",
-                            f"✅ Сохранено.\nШкола: {result.get('school', '?')}")
+                        QMessageBox.information(
+                            self, "Готово",
+                            f"✅ Сохранено.\n"
+                            f"Школа: {result.get('school', '?')}"
+                        )
                         self.tokens_saved.emit(auth)
                         self.accept()
                         return
@@ -698,125 +915,135 @@ class TokenImportDialog(QDialog):
                     self.append_log(f"[!] {e}")
                 QMessageBox.information(self, "Готово", "✅ Сохранено.")
             else:
-                QMessageBox.information(self, "Проверка успешна",
-                    f"✅ Токен рабочий.\nШкола: {result.get('school', '?')}")
+                QMessageBox.information(
+                    self, "Проверка успешна",
+                    f"✅ Токен рабочий.\n"
+                    f"Школа: {result.get('school', '?')}"
+                )
         else:
-            QMessageBox.warning(self, "Ошибка",
-                result.get("reason", "Неизвестная ошибка"))
+            QMessageBox.warning(
+                self, "Ошибка",
+                result.get("reason", "Неизвестная ошибка")
+            )
 
     def _set_ui_enabled(self, enabled):
         self.auth_token_edit.setEnabled(enabled)
         self.aupd_token_edit.setEnabled(enabled)
         self.profile_id_edit.setEnabled(enabled)
-        self.check_btn.setEnabled(enabled and
-            len(self.auth_token_edit.text().strip()) > 50)
+        self.check_btn.setEnabled(
+            enabled and len(self.auth_token_edit.text().strip()) > 50
+        )
         self.save_btn.setEnabled(enabled and bool(self.last_auth_obj))
         self.close_btn.setEnabled(enabled)
 
 
 # ============================================================
-#  Диалог ЭЖД — импорт JSON
+# Диалог ЭЖД — импорт JSON
 # ============================================================
-class EJDImportDialog(QDialog):
-    tokens_saved = Signal(object)
-
+class EJDImportDialog(_BaseImportDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("🔐 Импорт ЭЖД-сессии")
-        self.setMinimumSize(760, 620)
-        self.worker = None
+        self.setWindowTitle("🔐  Импорт ЭЖД-сессии")
+        self.setMinimumSize(780, 660)
         self._build_ui()
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 20)
-        layout.setSpacing(10)
+        layout.setSpacing(12)
 
-        title = QLabel("🔐 Импорт ЭЖД-сессии (JSON)")
-        title.setStyleSheet("font-size: 15pt; font-weight: bold;")
-        layout.addWidget(title)
+        # === Заголовок ===
+        layout.addWidget(self._make_title("🔐  Импорт ЭЖД-сессии (JSON)"))
+        layout.addWidget(self._make_subtitle(
+            "Загрузка готового JSON-файла с токенами и cookies ЭЖД."
+        ))
 
-        hint = QLabel(
+        # === Подсказка ===
+        hint = self._make_hint(
             "Поддерживаются форматы:\n"
-            "  • auth_data.json  — auth_token, aupd_token, profile_id, school_id\n"
+            "  • auth_data.json — auth_token, aupd_token, profile_id, school_id\n"
             "  • ejd_session.json / ejd_cookies.json — + cookies\n\n"
             "1. Откройте dnevnik.mos.ru и войдите.\n"
             "2. F12 → Console → скрипт zavuch2_ejd → Enter.\n"
             "3. Скачается файл.\n"
             "4. Ниже: «📋 Вставить из буфера» или «📁 Выбрать файл»."
         )
-        hint.setStyleSheet("color: #555; font-size: 9pt; background-color: #f5f5f5; "
-                           "padding: 8px; border-radius: 5px;")
-        hint.setWordWrap(True)
         layout.addWidget(hint)
 
+        # === Поле JSON ===
         self.json_edit = QPlainTextEdit()
         self.json_edit.setPlaceholderText(
             '{"auth_token": "...", "profile_id": "...", "cookies": {...}}'
         )
         self.json_edit.setMinimumHeight(220)
-        self.json_edit.setStyleSheet(
-            "font-family: Consolas, monospace; font-size: 9px;"
-        )
+        self.json_edit.setStyleSheet("""
+            QPlainTextEdit {
+                font-family: Consolas, "Courier New", monospace;
+                font-size: 9.5pt;
+                background-color: #0f172a;
+                color: #e2e8f0;
+                border: 1px solid #334155;
+                border-radius: 6px;
+                padding: 6px;
+            }
+        """)
         layout.addWidget(self.json_edit)
 
+        # === Кнопки ввода ===
         input_row = QHBoxLayout()
+        input_row.setSpacing(8)
 
-        self.paste_btn = QPushButton("📋 Вставить из буфера")
-        self.paste_btn.setMinimumHeight(34)
+        self.paste_btn = QPushButton("📋  Вставить из буфера")
+        self.paste_btn.setMinimumHeight(36)
+        self.paste_btn.setStyleSheet(GHOST_BTN)
         self.paste_btn.clicked.connect(self._paste_from_clipboard)
         input_row.addWidget(self.paste_btn)
 
-        self.load_file_btn = QPushButton("📁 Выбрать файл JSON")
-        self.load_file_btn.setMinimumHeight(34)
+        self.load_file_btn = QPushButton("📁  Выбрать файл JSON")
+        self.load_file_btn.setMinimumHeight(36)
         self.load_file_btn.clicked.connect(self._load_from_file)
         input_row.addWidget(self.load_file_btn)
 
-        self.clear_btn = QPushButton("🗑 Очистить")
-        self.clear_btn.setMinimumHeight(34)
+        self.clear_btn = QPushButton("🗑  Очистить")
+        self.clear_btn.setMinimumHeight(36)
+        self.clear_btn.setStyleSheet(DANGER_BTN)
         self.clear_btn.clicked.connect(self.json_edit.clear)
         input_row.addWidget(self.clear_btn)
 
         input_row.addStretch()
         layout.addLayout(input_row)
 
+        # === Кнопки действий ===
         action_row = QHBoxLayout()
+        action_row.setSpacing(8)
         action_row.addStretch()
 
-        self.save_btn = QPushButton("💾 Проверить и сохранить")
-        self.save_btn.setMinimumHeight(38)
-        self.save_btn.setMinimumWidth(240)
-        self.save_btn.setStyleSheet("""
-            QPushButton { background-color: #2563eb; color: white;
-                font-weight: bold; border-radius: 8px; }
-            QPushButton:hover { background-color: #1d4ed8; }
-            QPushButton:disabled { background-color: #cccccc; color: #666666; }
-        """)
+        self.save_btn = QPushButton("💾  Проверить и сохранить")
+        self.save_btn.setMinimumHeight(40)
+        self.save_btn.setMinimumWidth(260)
+        self.save_btn.setStyleSheet(PRIMARY_EJD_BTN)
         self.save_btn.clicked.connect(self._start_worker)
         action_row.addWidget(self.save_btn)
 
         self.close_btn = QPushButton("Закрыть")
-        self.close_btn.setMinimumHeight(38)
-        self.close_btn.setMinimumWidth(100)
+        self.close_btn.setMinimumHeight(40)
+        self.close_btn.setMinimumWidth(110)
         self.close_btn.clicked.connect(self.reject)
         action_row.addWidget(self.close_btn)
-
         layout.addLayout(action_row)
-        layout.addWidget(QLabel("Журнал:"))
 
-        self.log_view = QPlainTextEdit()
-        self.log_view.setReadOnly(True)
-        self.log_view.setMaximumBlockCount(3000)
-        self.log_view.setStyleSheet(
-            "font-family: Consolas, monospace; font-size: 10px; "
-            "background-color: #1e1e1e; color: #d4d4d4;"
+        # === Разделитель ===
+        layout.addWidget(self._make_separator())
+
+        # === Журнал ===
+        log_title = QLabel("📋  Журнал")
+        log_title.setStyleSheet(
+            "font-size: 11pt; font-weight: 700; color: #0369a1;"
         )
-        layout.addWidget(self.log_view, 1)
+        layout.addWidget(log_title)
 
-    def append_log(self, msg):
-        self.log_view.appendPlainText(msg)
-        sb = self.log_view.verticalScrollBar()
-        sb.setValue(sb.maximum())
+        self.log_view = self._make_log_view()
+        layout.addWidget(self.log_view, 1)
 
     def _paste_from_clipboard(self):
         text = get_from_clipboard()
@@ -826,7 +1053,8 @@ class EJDImportDialog(QDialog):
 
     def _load_from_file(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, "Выберите JSON", str(Path.home() / "Downloads"),
+            self, "Выберите JSON",
+            str(Path.home() / "Downloads"),
             "JSON files (*.json);;Все файлы (*.*)"
         )
         if not path:
@@ -835,15 +1063,20 @@ class EJDImportDialog(QDialog):
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
         except Exception as e:
-            QMessageBox.critical(self, "Ошибка", f"Не удалось прочитать:\n{e}")
+            QMessageBox.critical(
+                self, "Ошибка", f"Не удалось прочитать:\n{e}"
+            )
             return
 
         if not isinstance(data, dict) or "auth_token" not in data:
-            QMessageBox.warning(self, "Не тот файл",
-                                "Нет поля auth_token.")
+            QMessageBox.warning(
+                self, "Не тот файл", "Нет поля auth_token."
+            )
             return
 
-        self.json_edit.setPlainText(json.dumps(data, ensure_ascii=False, indent=2))
+        self.json_edit.setPlainText(
+            json.dumps(data, ensure_ascii=False, indent=2)
+        )
         cookies_count = 0
         if isinstance(data.get("cookies"), dict):
             cookies_count = len(data["cookies"])
@@ -865,7 +1098,10 @@ class EJDImportDialog(QDialog):
     def _start_worker(self):
         raw = self.json_edit.toPlainText().strip()
         if not raw:
-            QMessageBox.warning(self, "Ошибка", "Вставьте JSON или выберите файл.")
+            QMessageBox.warning(
+                self, "Ошибка",
+                "Вставьте JSON или выберите файл."
+            )
             return
         self._set_ui_enabled(False)
         self.append_log("=" * 50)
@@ -877,10 +1113,12 @@ class EJDImportDialog(QDialog):
 
     def _on_done(self, result):
         self._set_ui_enabled(True)
-
         if result.get("ok") and result.get("saved"):
-            QMessageBox.information(self, "Готово",
-                f"✅ ЭЖД-сессия сохранена.\n\nШкола: {result.get('school', '?')}")
+            QMessageBox.information(
+                self, "Готово",
+                f"✅ ЭЖД-сессия сохранена.\n\n"
+                f"Школа: {result.get('school', '?')}"
+            )
             try:
                 from auth import dn_Auth
                 auth = dn_Auth()
@@ -890,24 +1128,30 @@ class EJDImportDialog(QDialog):
                     return
             except Exception as e:
                 self.append_log(f"[!] {e}")
-            self.tokens_saved.emit({"saved": True,
-                                     "school": result.get("school", "")})
+            self.tokens_saved.emit({
+                "saved": True,
+                "school": result.get("school", ""),
+            })
             self.accept()
             return
 
         if result.get("ok") and not result.get("saved"):
             reason = result.get("reason", "причина неизвестна")
-            QMessageBox.warning(self, "Не удалось сохранить",
+            QMessageBox.warning(
+                self, "Не удалось сохранить",
                 f"✅ Токен рабочий, но сохранить не удалось.\n\n"
                 f"Причина: {reason}\n\n"
                 "Проверьте:\n"
                 "• Закрыто ли главное окно zavuch 2\n"
                 "• Не запущено ли несколько копий приложения\n"
-                "• Есть ли права на запись в sessions/")
+                "• Есть ли права на запись в sessions/"
+            )
             return
 
-        QMessageBox.warning(self, "Ошибка импорта",
-            f"{result.get('reason', 'Неизвестная ошибка')}")
+        QMessageBox.warning(
+            self, "Ошибка импорта",
+            f"{result.get('reason', 'Неизвестная ошибка')}"
+        )
 
     def _set_ui_enabled(self, enabled):
         self.paste_btn.setEnabled(enabled)
@@ -918,28 +1162,28 @@ class EJDImportDialog(QDialog):
 
 
 # ============================================================
-#  Диалог ПДОУ
+# Диалог ПДОУ
 # ============================================================
-class PDOUImportDialog(QDialog):
-    tokens_saved = Signal(object)
-
+class PDOUImportDialog(_BaseImportDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("🎨 Импорт ПДОУ-сессии")
-        self.setMinimumSize(760, 620)
-        self.worker = None
+        self.setWindowTitle("🎨  Импорт ПДОУ-сессии")
+        self.setMinimumSize(780, 660)
         self._build_ui()
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 20)
-        layout.setSpacing(10)
+        layout.setSpacing(12)
 
-        title = QLabel("🎨 Импорт ПДОУ-сессии (JSON)")
-        title.setStyleSheet("font-size: 15pt; font-weight: bold;")
-        layout.addWidget(title)
+        # === Заголовок ===
+        layout.addWidget(self._make_title("🎨  Импорт ПДОУ-сессии (JSON)"))
+        layout.addWidget(self._make_subtitle(
+            "Загрузка готового JSON-файла с токенами ПДОУ."
+        ))
 
-        hint = QLabel(
+        # === Подсказка ===
+        hint = self._make_hint(
             "1. Откройте esz.mos.ru и войдите в ПДОУ.\n"
             "2. F12 → Console → скрипт zavuch2 → Enter.\n"
             "3. Скачается pdou_session.json.\n"
@@ -947,78 +1191,82 @@ class PDOUImportDialog(QDialog):
             "   добавьте их значения из DevTools → Application → Cookies.\n"
             "5. Ниже: «📋 Вставить из буфера» или «📁 Выбрать файл»."
         )
-        hint.setStyleSheet("color: #555; font-size: 9pt; background-color: #f5f5f5; "
-                           "padding: 8px; border-radius: 5px;")
-        hint.setWordWrap(True)
         layout.addWidget(hint)
 
+        # === Поле JSON ===
         self.json_edit = QPlainTextEdit()
         self.json_edit.setPlaceholderText(
             '{"aupd_token": "...", "esztoken": "...", "cookies": {...}}'
         )
         self.json_edit.setMinimumHeight(220)
-        self.json_edit.setStyleSheet(
-            "font-family: Consolas, monospace; font-size: 9px;"
-        )
+        self.json_edit.setStyleSheet("""
+            QPlainTextEdit {
+                font-family: Consolas, "Courier New", monospace;
+                font-size: 9.5pt;
+                background-color: #0f172a;
+                color: #e2e8f0;
+                border: 1px solid #334155;
+                border-radius: 6px;
+                padding: 6px;
+            }
+        """)
         layout.addWidget(self.json_edit)
 
+        # === Кнопки ввода ===
         input_row = QHBoxLayout()
+        input_row.setSpacing(8)
 
-        self.paste_btn = QPushButton("📋 Вставить из буфера")
-        self.paste_btn.setMinimumHeight(34)
+        self.paste_btn = QPushButton("📋  Вставить из буфера")
+        self.paste_btn.setMinimumHeight(36)
+        self.paste_btn.setStyleSheet(GHOST_PDOU_BTN)
         self.paste_btn.clicked.connect(self._paste_from_clipboard)
         input_row.addWidget(self.paste_btn)
 
-        self.load_file_btn = QPushButton("📁 Выбрать файл pdou_session.json")
-        self.load_file_btn.setMinimumHeight(34)
+        self.load_file_btn = QPushButton("📁  Выбрать файл pdou_session.json")
+        self.load_file_btn.setMinimumHeight(36)
         self.load_file_btn.clicked.connect(self._load_from_file)
         input_row.addWidget(self.load_file_btn)
 
-        self.clear_btn = QPushButton("🗑 Очистить")
-        self.clear_btn.setMinimumHeight(34)
+        self.clear_btn = QPushButton("🗑  Очистить")
+        self.clear_btn.setMinimumHeight(36)
+        self.clear_btn.setStyleSheet(DANGER_BTN)
         self.clear_btn.clicked.connect(self.json_edit.clear)
         input_row.addWidget(self.clear_btn)
 
         input_row.addStretch()
         layout.addLayout(input_row)
 
+        # === Кнопки действий ===
         action_row = QHBoxLayout()
+        action_row.setSpacing(8)
         action_row.addStretch()
 
-        self.save_btn = QPushButton("💾 Проверить и сохранить")
-        self.save_btn.setMinimumHeight(38)
-        self.save_btn.setMinimumWidth(240)
-        self.save_btn.setStyleSheet("""
-            QPushButton { background-color: #8b5cf6; color: white;
-                font-weight: bold; border-radius: 8px; }
-            QPushButton:hover { background-color: #7c3aed; }
-            QPushButton:disabled { background-color: #cccccc; color: #666666; }
-        """)
+        self.save_btn = QPushButton("💾  Проверить и сохранить")
+        self.save_btn.setMinimumHeight(40)
+        self.save_btn.setMinimumWidth(260)
+        self.save_btn.setStyleSheet(PRIMARY_PDOU_BTN)
         self.save_btn.clicked.connect(self._start_worker)
         action_row.addWidget(self.save_btn)
 
         self.close_btn = QPushButton("Закрыть")
-        self.close_btn.setMinimumHeight(38)
-        self.close_btn.setMinimumWidth(100)
+        self.close_btn.setMinimumHeight(40)
+        self.close_btn.setMinimumWidth(110)
         self.close_btn.clicked.connect(self.reject)
         action_row.addWidget(self.close_btn)
-
         layout.addLayout(action_row)
-        layout.addWidget(QLabel("Журнал:"))
 
-        self.log_view = QPlainTextEdit()
-        self.log_view.setReadOnly(True)
-        self.log_view.setMaximumBlockCount(3000)
-        self.log_view.setStyleSheet(
-            "font-family: Consolas, monospace; font-size: 10px; "
-            "background-color: #1e1e1e; color: #d4d4d4;"
+        # === Разделитель ===
+        layout.addWidget(self._make_separator())
+
+        # === Журнал ===
+        log_title = QLabel("📋  Журнал")
+        log_title.setStyleSheet(
+            "font-size: 11pt; font-weight: 700; color: #6d28d9;"
         )
-        layout.addWidget(self.log_view, 1)
+        layout.addWidget(log_title)
 
-    def append_log(self, msg):
-        self.log_view.appendPlainText(msg)
-        sb = self.log_view.verticalScrollBar()
-        sb.setValue(sb.maximum())
+        self.log_view = self._make_log_view()
+        layout.addWidget(self.log_view, 1)
 
     def _paste_from_clipboard(self):
         text = get_from_clipboard()
@@ -1038,15 +1286,21 @@ class PDOUImportDialog(QDialog):
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
         except Exception as e:
-            QMessageBox.critical(self, "Ошибка", f"Не удалось прочитать:\n{e}")
+            QMessageBox.critical(
+                self, "Ошибка", f"Не удалось прочитать:\n{e}"
+            )
             return
 
         if not isinstance(data, dict) or "aupd_token" not in data:
-            QMessageBox.warning(self, "Не тот файл",
-                                "Нет полей aupd_token / esztoken.")
+            QMessageBox.warning(
+                self, "Не тот файл",
+                "Нет полей aupd_token / esztoken."
+            )
             return
 
-        self.json_edit.setPlainText(json.dumps(data, ensure_ascii=False, indent=2))
+        self.json_edit.setPlainText(
+            json.dumps(data, ensure_ascii=False, indent=2)
+        )
         ltpa = "✅" if data.get("cookies", {}).get("Ltpatoken2") else "❌"
         session = "✅" if data.get("cookies", {}).get("session-cookie") else "❌"
         self.append_log(f"[+] Загружен файл: {path}")
@@ -1055,7 +1309,10 @@ class PDOUImportDialog(QDialog):
     def _start_worker(self):
         raw = self.json_edit.toPlainText().strip()
         if not raw:
-            QMessageBox.warning(self, "Ошибка", "Вставьте JSON или выберите файл.")
+            QMessageBox.warning(
+                self, "Ошибка",
+                "Вставьте JSON или выберите файл."
+            )
             return
         self._set_ui_enabled(False)
         self.append_log("=" * 50)
@@ -1067,29 +1324,37 @@ class PDOUImportDialog(QDialog):
 
     def _on_done(self, result):
         self._set_ui_enabled(True)
-
         if result.get("ok") and result.get("saved"):
             user_name = result.get("user_name", "") or "неизвестен"
             roles = result.get("roles", []) or []
-            roles_text = "\n".join(f"• {r}" for r in roles) if roles else "(нет)"
-
-            QMessageBox.information(self, "Готово",
+            roles_text = (
+                "\n".join(f"• {r}" for r in roles) if roles else "(нет)"
+            )
+            QMessageBox.information(
+                self, "Готово",
                 f"✅ ПДОУ-сессия сохранена.\n\n"
-                f"Пользователь: {user_name}\n\nРоли ЕСЗ:\n{roles_text}")
-
+                f"Пользователь: {user_name}\n\n"
+                f"Роли ЕСЗ:\n{roles_text}"
+            )
             self.tokens_saved.emit({
-                "user_name": user_name, "roles": roles, "saved": True,
+                "user_name": user_name,
+                "roles": roles,
+                "saved": True,
             })
             self.accept()
             return
 
         if result.get("ok") and not result.get("saved"):
-            QMessageBox.information(self, "Проверка успешна",
-                "✅ Токены рабочие, но сохранение не выполнялось.")
+            QMessageBox.information(
+                self, "Проверка успешна",
+                "✅ Токены рабочие, но сохранение не выполнялось."
+            )
             return
 
-        QMessageBox.warning(self, "Ошибка импорта ПДОУ-сессии",
-            f"{result.get('reason', 'Неизвестная ошибка')}")
+        QMessageBox.warning(
+            self, "Ошибка импорта ПДОУ-сессии",
+            f"{result.get('reason', 'Неизвестная ошибка')}"
+        )
 
     def _set_ui_enabled(self, enabled):
         self.paste_btn.setEnabled(enabled)

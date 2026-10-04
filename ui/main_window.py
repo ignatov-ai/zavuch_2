@@ -1,15 +1,13 @@
 # -*- coding: utf-8 -*-
 """
 Главное окно приложения. Поддерживает два режима:
-  • ЭЖД-режим — все вкладки.
-  • ПДОУ-режим — только ПДОУ-вкладки + «Настройки».
+• ЭЖД-режим — все вкладки.
+• ПДОУ-режим — только ПДОУ-вкладки + «Настройки».
 """
 import sys
-
 from PySide6.QtWidgets import *
 from PySide6.QtCore import *
 from PySide6.QtGui import *
-
 from ui.download_tab import DownloadTab
 from ui.check_tab import CheckTab
 from ui.notify_tab import NotifyTab
@@ -27,7 +25,6 @@ from ui.pdou_requests_tab import PDOURequestsTab
 
 class MainWindow(QMainWindow):
     """Главное окно приложения. Поддерживает ЭЖД- и ПДОУ-режимы."""
-
     auth_updated = Signal(object)
 
     def __init__(self):
@@ -38,7 +35,6 @@ class MainWindow(QMainWindow):
         self.tab_widgets = []
         self._menu_visible = True
         self.initUI()
-
         self.stream = EmittingStream()
         self.stream.text_written.connect(self.append_to_console)
         sys.stdout = self.stream
@@ -49,12 +45,11 @@ class MainWindow(QMainWindow):
 
         screen = QApplication.primaryScreen().geometry()
         width = int(screen.width() * 0.85)
-        height = int(screen.height() * 0.9)
+        height = int(screen.height() * 0.8)
         self.setGeometry(50, 30, width, height)
 
         central = QWidget()
         self.setCentralWidget(central)
-
         main_layout = QHBoxLayout(central)
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
@@ -67,35 +62,39 @@ class MainWindow(QMainWindow):
 
         self.title_label = QLabel("📚  zavuch 2")
         self.title_label.setStyleSheet("""
-            font-size: 14pt;
-            font-weight: bold;
-            color: #2563eb;
-            padding: 15px 10px 10px 15px;
+            font-size: 15pt;
+            font-weight: 700;
+            color: #1d4ed8;
+            padding: 18px 10px 14px 18px;
+            background: #ffffff;
+            border-bottom: 1px solid #e2e8f0;
         """)
         menu_container_layout.addWidget(self.title_label)
 
         self.menu_list = QListWidget()
         self.menu_list.setStyleSheet("""
             QListWidget {
-                background-color: #f0f4f8;
+                background-color: #f8fafc;
                 border: none;
-                padding: 5px;
+                padding: 8px;
                 outline: 0;
-                font-size: 11pt;
+                font-size: 10.5pt;
+                color: #1e293b;
             }
             QListWidget::item {
-                padding: 12px 15px;
-                border-radius: 8px;
-                margin: 3px 5px;
-                color: #1f2937;
+                padding: 11px 14px;
+                border-radius: 7px;
+                margin: 2px 4px;
+                color: #334155;
             }
             QListWidget::item:hover {
-                background-color: #e0e7ef;
+                background-color: #eff6ff;
+                color: #1d4ed8;
             }
             QListWidget::item:selected {
-                background-color: #2563eb;
+                background-color: #1d4ed8;
                 color: #ffffff;
-                font-weight: bold;
+                font-weight: 600;
             }
         """)
         self.menu_list.currentRowChanged.connect(self.on_menu_changed)
@@ -103,11 +102,12 @@ class MainWindow(QMainWindow):
 
         self.menu_container.setFixedWidth(280)
         self.menu_container.setStyleSheet("""
-            QWidget {
-                background-color: #f0f4f8;
-                border-right: 1px solid #d0d7de;
+            QWidget#menuContainer {
+                background-color: #f8fafc;
+                border-right: 1px solid #e2e8f0;
             }
         """)
+        self.menu_container.setObjectName("menuContainer")
 
         # === КНОПКА СВОРАЧИВАНИЯ ===
         self.toggle_menu_btn = QPushButton("◀")
@@ -119,21 +119,21 @@ class MainWindow(QMainWindow):
         self.toggle_menu_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.toggle_menu_btn.setStyleSheet("""
             QPushButton {
-                background-color: #e0e7ef;
+                background-color: #f1f5f9;
                 border: none;
-                border-right: 1px solid #cbd5e1;
-                border-left: 1px solid #cbd5e1;
+                border-right: 1px solid #e2e8f0;
+                border-left: 1px solid #e2e8f0;
                 font-size: 10pt;
-                font-weight: bold;
-                color: #475569;
+                font-weight: 700;
+                color: #64748b;
                 padding: 0px;
             }
             QPushButton:hover {
-                background-color: #cbd5e1;
-                color: #1e293b;
+                background-color: #e2e8f0;
+                color: #1d4ed8;
             }
             QPushButton:pressed {
-                background-color: #94a3b8;
+                background-color: #cbd5e1;
             }
         """)
         self.toggle_menu_btn.clicked.connect(self.toggle_menu)
@@ -149,7 +149,7 @@ class MainWindow(QMainWindow):
 
         right_container = QWidget()
         right_layout = QVBoxLayout(right_container)
-        right_layout.setContentsMargins(15, 15, 15, 15)
+        right_layout.setContentsMargins(16, 16, 16, 16)
         right_layout.setSpacing(0)
         right_layout.addWidget(self.stack)
 
@@ -215,7 +215,6 @@ class MainWindow(QMainWindow):
             w = self.stack.widget(0)
             self.stack.removeWidget(w)
         self.menu_list.blockSignals(False)
-
         self.tab_widgets = []
 
         if mode == "pdou":
@@ -243,10 +242,26 @@ class MainWindow(QMainWindow):
             self.setWindowTitle("zavuch 2 — ПДОУ (кружки и заявления)")
             if hasattr(self, "title_label"):
                 self.title_label.setText("🎨  zavuch 2 · ПДОУ")
+                self.title_label.setStyleSheet("""
+                    font-size: 15pt;
+                    font-weight: 700;
+                    color: #7c3aed;
+                    padding: 18px 10px 14px 18px;
+                    background: #ffffff;
+                    border-bottom: 1px solid #e2e8f0;
+                """)
         elif self.mode == "ejd":
             self.setWindowTitle("zavuch 2 — ЭЖД МЭШ")
             if hasattr(self, "title_label"):
                 self.title_label.setText("📚  zavuch 2 · ЭЖД")
+                self.title_label.setStyleSheet("""
+                    font-size: 15pt;
+                    font-weight: 700;
+                    color: #1d4ed8;
+                    padding: 18px 10px 14px 18px;
+                    background: #ffffff;
+                    border-bottom: 1px solid #e2e8f0;
+                """)
         else:
             self.setWindowTitle("zavuch 2")
             if hasattr(self, "title_label"):
@@ -271,17 +286,13 @@ class MainWindow(QMainWindow):
     def on_global_auth(self, auth_data):
         if not auth_data:
             return
-
         if isinstance(auth_data, dict) and auth_data.get("saved"):
-            # ПДОУ-режим
             self.mode = "pdou"
             self.auth = None
             self.auth_obj = None
-
             user_name = auth_data.get("user_name", "") or "неизвестен"
             roles = auth_data.get("roles", []) or []
             roles_text = ", ".join(roles) if roles else "нет ролей"
-
             self._build_tabs_for_mode("pdou")
             self._apply_mode_title()
             self.append_to_console(
@@ -292,17 +303,13 @@ class MainWindow(QMainWindow):
             )
             return
 
-        # ЭЖД-режим
         self.mode = "ejd"
         self.auth = auth_data
         self.auth_obj = auth_data
-
         if hasattr(self.settings_tab, 'set_auth'):
             self.settings_tab.set_auth(auth_data)
-
         self._build_tabs_for_mode("ejd")
         self._apply_mode_title()
-
         self.auth_updated.emit(auth_data)
         self.append_to_console(
             "✅ ЭЖД-режим. Авторизация установлена. Все вкладки готовы."
@@ -312,7 +319,6 @@ class MainWindow(QMainWindow):
         current_widget = self.stack.currentWidget()
         if not hasattr(current_widget, "console"):
             return
-
         console = current_widget.console
         if hasattr(console, "append_text"):
             console.append_text(text)

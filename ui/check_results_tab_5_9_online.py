@@ -2,25 +2,13 @@
 """
 Вкладка «Проверка итогов (5-11) Online».
 Данные тянутся из API dnevnik.mos.ru без скачивания Excel-журналов.
-
-Логика:
-  1. Параллель (5–11) → загрузка списка групп через /jersey/api/groups.
-  2. Класс → уникальные классы внутри параллели.
-  3. Журнал → группы выбранного класса.
-  4. Проверка:
-       • тянем student_profiles с final_marks;
-       • тянем все marks за учебный год по группе;
-       • считаем средние баллы по периодам;
-       • проверяем годовые и (опционально) триместры.
 """
 from collections import defaultdict
 from datetime import datetime
 import os
-
 from PySide6.QtWidgets import *
 from PySide6.QtCore import *
 from PySide6.QtGui import *
-
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
@@ -32,7 +20,123 @@ PERIOD_MAPPING_SEMESTERS = {83561: 'П1', 83562: 'П2'}
 
 
 # ============================================================
-#  Поток: загрузка групп параллели
+# Единый стиль (зелёный акцент — «online»)
+# ============================================================
+TAB_STYLE = """
+    QWidget {
+        font-size: 10pt;
+        color: #1e293b;
+    }
+    QGroupBox {
+        font-size: 11pt;
+        font-weight: 700;
+        color: #059669;
+        border: 1px solid #6ee7b7;
+        border-radius: 10px;
+        margin-top: 12px;
+        padding: 18px 14px 14px 14px;
+        background: #ffffff;
+    }
+    QGroupBox::title {
+        subcontrol-origin: margin;
+        left: 12px;
+        padding: 0 6px;
+    }
+    QLineEdit {
+        min-height: 30px;
+        padding: 2px 8px;
+        border: 1px solid #cbd5e1;
+        border-radius: 5px;
+        background: #ffffff;
+    }
+    QLineEdit:focus { border: 1px solid #059669; }
+    QPushButton {
+        min-height: 30px;
+        padding: 4px 12px;
+        border: 1px solid #cbd5e1;
+        border-radius: 5px;
+        background: #f8fafc;
+        color: #1e293b;
+        font-weight: 500;
+    }
+    QPushButton:hover { background: #e2e8f0; }
+    QPushButton:disabled {
+        background: #f1f5f9;
+        color: #94a3b8;
+        border-color: #e2e8f0;
+    }
+    QComboBox {
+        min-height: 30px;
+        padding: 2px 8px;
+        border: 1px solid #cbd5e1;
+        border-radius: 5px;
+        background: #ffffff;
+    }
+    QTableWidget {
+        border: 1px solid #e2e8f0;
+        border-radius: 6px;
+        gridline-color: #e2e8f0;
+        alternate-background-color: #f8fafc;
+    }
+    QTableWidget::item { padding: 3px 6px; }
+    QHeaderView::section {
+        background: #f1f5f9;
+        color: #1e293b;
+        padding: 5px;
+        border: none;
+        border-right: 1px solid #e2e8f0;
+        border-bottom: 1px solid #e2e8f0;
+        font-weight: 600;
+    }
+    QProgressBar {
+        min-height: 22px;
+        border: 1px solid #cbd5e1;
+        border-radius: 6px;
+        background: #f8fafc;
+        text-align: center;
+        color: #1e293b;
+        font-weight: 600;
+    }
+    QProgressBar::chunk {
+        background-color: #059669;
+        border-radius: 5px;
+    }
+"""
+
+PRIMARY_BTN = """
+    QPushButton {
+        background-color: #059669;
+        color: #ffffff;
+        font-weight: 700;
+        border: none;
+        border-radius: 7px;
+    }
+    QPushButton:hover { background-color: #047857; }
+    QPushButton:pressed { background-color: #065f46; }
+    QPushButton:disabled {
+        background-color: #cbd5e1;
+        color: #64748b;
+    }
+"""
+
+SUCCESS_BTN = """
+    QPushButton {
+        background-color: #0284c7;
+        color: #ffffff;
+        font-weight: 600;
+        border: none;
+        border-radius: 6px;
+    }
+    QPushButton:hover { background-color: #0369a1; }
+    QPushButton:disabled {
+        background-color: #cbd5e1;
+        color: #64748b;
+    }
+"""
+
+
+# ============================================================
+# Поток: загрузка групп параллели
 # ============================================================
 class OnlineGroupsLoadThread(QThread):
     finished = Signal(list)
@@ -54,7 +158,7 @@ class OnlineGroupsLoadThread(QThread):
                     "class_level_id": self.class_level,
                     "pid": self.auth.pid,
                     "with_lessons_only": "false",
-                }
+                },
             ) or []
             self.log.emit(f"[Online] Получено групп: {len(data)}")
             self.finished.emit(data)
@@ -65,15 +169,9 @@ class OnlineGroupsLoadThread(QThread):
 
 
 # ============================================================
-#  Поток: загрузка учеников + отметок для группы
+# Поток: загрузка учеников + отметок для группы
 # ============================================================
 class OnlineStudentsMarksLoadThread(QThread):
-    """
-    Загружает:
-      • student_profiles группы с final_marks;
-      • все marks группы за учебный год;
-    Возвращает dict: {"students": [...], "marks": [...]}
-    """
     finished = Signal(dict)
     error = Signal(str)
     log = Signal(str)
@@ -86,7 +184,6 @@ class OnlineStudentsMarksLoadThread(QThread):
 
     def run(self):
         try:
-            # 1. Ученики с итоговыми
             self.log.emit(f"[Online] Загружаю учеников группы {self.group_id}...")
             students = self.auth.fetch(
                 "https://dnevnik.mos.ru/core/api/student_profiles",
@@ -101,16 +198,15 @@ class OnlineStudentsMarksLoadThread(QThread):
                     'with_final_marks': 'true',
                     'with_groups': 'true',
                     'with_home_based': 'true',
-                }
+                },
             ) or []
             self.log.emit(f"[Online] Получено учеников: {len(students)}")
 
-            # 2. Все отметки группы за учебный год
             self.log.emit(f"[Online] Загружаю отметки группы {self.group_id}...")
             all_marks = []
             page = 1
             per_page = 1000
-            # Границы учебного года
+
             now = datetime.now()
             if now.month >= 9:
                 start_date = f"01.09.{now.year}"
@@ -129,7 +225,7 @@ class OnlineStudentsMarksLoadThread(QThread):
                         'per_page': per_page,
                         'page': page,
                         'pid': self.auth.pid,
-                    }
+                    },
                 ) or []
                 if not page_data:
                     break
@@ -139,9 +235,7 @@ class OnlineStudentsMarksLoadThread(QThread):
                 page += 1
 
             self.log.emit(f"[Online] Получено отметок: {len(all_marks)}")
-
             self.finished.emit({"students": students, "marks": all_marks})
-
         except Exception as e:
             import traceback
             self.error.emit(f"{type(e).__name__}: {e}\n\n{traceback.format_exc()}")
@@ -149,11 +243,10 @@ class OnlineStudentsMarksLoadThread(QThread):
 
 
 # ============================================================
-#  Вкладка
+# Вкладка
 # ============================================================
 class CheckResultsTab5_9Online(QWidget):
     """Проверка итоговых отметок 5-11 онлайн + средние баллы по периодам."""
-
     log_signal = Signal(str)
 
     def __init__(self, parent):
@@ -165,40 +258,64 @@ class CheckResultsTab5_9Online(QWidget):
         self.current_class_groups = []
         self.all_results = []
         self._is_loading = False
-
         self.initUI()
         self.log_signal.connect(self.append_to_status)
 
-    # ------------------------------------------------------------------
     def initUI(self):
         main_layout = QVBoxLayout(self)
-        main_layout.setSpacing(10)
-        main_layout.setContentsMargins(10, 10, 10, 10)
+        main_layout.setSpacing(12)
+        main_layout.setContentsMargins(16, 14, 16, 14)
+
+        # Заголовок
+        title = QLabel("🎯  Проверка итогов Online (5-11)")
+        title.setStyleSheet(
+            "font-size: 16pt; font-weight: 700; color: #0f172a; padding: 2px 0 4px 0;"
+        )
+        main_layout.addWidget(title)
+
+        subtitle = QLabel(
+            "Данные загружаются напрямую из ЭЖД МЭШ. "
+            "Выберите параллель, класс и журнал."
+        )
+        subtitle.setWordWrap(True)
+        subtitle.setStyleSheet("color: #64748b; margin-bottom: 4px;")
+        main_layout.addWidget(subtitle)
 
         # === Панель управления ===
-        settings_group = QGroupBox("Онлайн-проверка итогов (5-11)")
+        settings_group = QGroupBox("Онлайн-проверка итогов")
         settings_layout = QGridLayout(settings_group)
-        settings_layout.setVerticalSpacing(8)
-        settings_layout.setHorizontalSpacing(10)
+        settings_layout.setVerticalSpacing(10)
+        settings_layout.setHorizontalSpacing(12)
 
         settings_layout.addWidget(QLabel("Параллель:"), 0, 0)
         self.level_combo = QComboBox()
-        self.level_combo.setMinimumWidth(140)
+        self.level_combo.setMinimumWidth(160)
         self.level_combo.addItem("Выберите параллель", None)
         for level in range(5, 12):
             self.level_combo.addItem(f"{level} класс", level)
         self.level_combo.currentIndexChanged.connect(self.on_level_changed)
         settings_layout.addWidget(self.level_combo, 0, 1)
 
-        self.load_groups_btn = QPushButton("📋 1. Загрузить журналы параллели")
-        self.load_groups_btn.setMinimumHeight(32)
+        self.load_groups_btn = QPushButton("📋  1. Загрузить журналы параллели")
+        self.load_groups_btn.setMinimumHeight(38)
         self.load_groups_btn.setEnabled(False)
+        self.load_groups_btn.setStyleSheet("""
+            QPushButton {
+                background: #ecfdf5; color: #059669;
+                border: 1px solid #a7f3d0; font-weight: 600;
+            }
+            QPushButton:hover { background: #d1fae5; }
+            QPushButton:disabled {
+                background: #f1f5f9; color: #94a3b8;
+                border-color: #e2e8f0;
+            }
+        """)
         self.load_groups_btn.clicked.connect(self.load_groups)
         settings_layout.addWidget(self.load_groups_btn, 0, 2, 1, 2)
 
         settings_layout.addWidget(QLabel("Класс:"), 1, 0)
         self.class_combo = QComboBox()
-        self.class_combo.setMinimumWidth(200)
+        self.class_combo.setMinimumWidth(220)
         self.class_combo.addItem("— выберите класс —", None)
         self.class_combo.setEnabled(False)
         self.class_combo.currentIndexChanged.connect(self.on_class_changed)
@@ -212,20 +329,16 @@ class CheckResultsTab5_9Online(QWidget):
         self.group_combo.currentIndexChanged.connect(self._update_check_btn)
         settings_layout.addWidget(self.group_combo, 1, 3)
 
-        self.check_btn = QPushButton("🔍 2. Проверить итоговые отметки")
+        self.check_btn = QPushButton("🔍  2. Проверить итоговые отметки")
         self.check_btn.setEnabled(False)
-        self.check_btn.setMinimumHeight(35)
-        self.check_btn.setStyleSheet("""
-            QPushButton { background-color: #4CAF50; color: white;
-                font-weight: bold; border-radius: 5px; }
-            QPushButton:hover { background-color: #45a049; }
-            QPushButton:disabled { background-color: #cccccc; color: #666666; }
-        """)
+        self.check_btn.setMinimumHeight(42)
+        self.check_btn.setStyleSheet(PRIMARY_BTN + "QPushButton { font-size: 11pt; }")
         self.check_btn.clicked.connect(self.check_results)
         settings_layout.addWidget(self.check_btn, 2, 0, 1, 2)
 
-        self.export_btn = QPushButton("📊 Экспорт в Excel")
+        self.export_btn = QPushButton("📊  Экспорт в Excel")
         self.export_btn.setEnabled(False)
+        self.export_btn.setStyleSheet(SUCCESS_BTN)
         self.export_btn.clicked.connect(self.export_to_excel)
         settings_layout.addWidget(self.export_btn, 2, 2, 1, 2)
 
@@ -236,59 +349,86 @@ class CheckResultsTab5_9Online(QWidget):
         main_layout.addWidget(settings_group)
 
         # === Фильтры ===
-        filter_group = QGroupBox("Фильтры")
+        filter_group = QGroupBox("🔎  Фильтры")
+        filter_group.setStyleSheet("""
+            QGroupBox {
+                font-size: 11pt; font-weight: 700;
+                color: #0369a1; border: 1px solid #7dd3fc;
+                border-radius: 10px; margin-top: 12px;
+                padding: 18px 14px 14px 14px; background: #ffffff;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin; left: 12px; padding: 0 6px;
+            }
+        """)
         filter_layout = QHBoxLayout(filter_group)
-        filter_layout.setSpacing(8)
+        filter_layout.setSpacing(10)
+        filter_layout.setContentsMargins(10, 6, 10, 10)
 
         filter_layout.addWidget(QLabel("Ученик:"))
         self.filter_student = QLineEdit()
         self.filter_student.setPlaceholderText("ФИО")
-        self.filter_student.setMaximumWidth(160)
+        self.filter_student.setFixedWidth(180)
         self.filter_student.textChanged.connect(self.apply_filter)
         filter_layout.addWidget(self.filter_student)
 
         filter_layout.addWidget(QLabel("Статус:"))
         self.filter_status = QComboBox()
         self.filter_status.addItems([
-            "Все статусы",
-            "✅ СОВПАДАЕТ",
-            "❌ НЕ СОВПАДАЕТ",
-            "⚠️ НЕТ ГПА",
-            "⚠️ ДОЛГ (А/З)",
-            "⚠️ НПА",
-            "⚠️ НЕТ ДАННЫХ",
+            "Все статусы", "✅ СОВПАДАЕТ", "❌ НЕ СОВПАДАЕТ",
+            "⚠️ НЕТ ГПА", "⚠️ ДОЛГ (А/З)", "⚠️ НПА", "⚠️ НЕТ ДАННЫХ",
         ])
-        self.filter_status.setMaximumWidth(180)
+        self.filter_status.setFixedWidth(180)
         self.filter_status.currentTextChanged.connect(self.apply_filter)
         filter_layout.addWidget(self.filter_status)
 
         self.clear_filters_btn = QPushButton("Очистить")
+        self.clear_filters_btn.setStyleSheet("""
+            QPushButton {
+                background: #fff1f2; color: #be123c;
+                border: 1px solid #fecdd3; font-weight: 600;
+            }
+            QPushButton:hover { background: #ffe4e6; }
+        """)
         self.clear_filters_btn.clicked.connect(self.clear_filters)
         filter_layout.addWidget(self.clear_filters_btn)
-
         filter_layout.addStretch()
+
         main_layout.addWidget(filter_group)
 
         # === Таблица ===
         self.results_table = QTableWidget()
         self.results_table.setAlternatingRowColors(True)
         self.results_table.setSortingEnabled(False)
-        self.results_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self.results_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.results_table.setSelectionBehavior(
+            QTableWidget.SelectionBehavior.SelectRows
+        )
+        self.results_table.setEditTriggers(
+            QTableWidget.EditTrigger.NoEditTriggers
+        )
         self.results_table.horizontalHeader().setStretchLastSection(True)
-        main_layout.addWidget(self.results_table)
+        main_layout.addWidget(self.results_table, 1)
 
         # === Статус ===
         self.status_label = QLabel("Готов к работе")
-        self.status_label.setStyleSheet("color: #666; padding: 2px;")
+        self.status_label.setStyleSheet("""
+            color: #065f46; background: #ecfdf5;
+            border-radius: 6px; padding: 7px 10px;
+            font-weight: 600;
+        """)
         main_layout.addWidget(self.status_label)
 
+        self.setStyleSheet(TAB_STYLE)
+
+    # ================================================================
+    # Служебные методы
+    # ================================================================
     def append_to_status(self, text):
         self.status_label.setText(str(text)[:200])
         QApplication.processEvents()
 
     # ================================================================
-    #  АВТОРИЗАЦИЯ
+    # Авторизация
     # ================================================================
     def on_auth_updated(self, auth):
         self.auth = auth
@@ -310,7 +450,7 @@ class CheckResultsTab5_9Online(QWidget):
             self.auth.curr_aid = str(aid)
 
     # ================================================================
-    #  ЗАГРУЗКА ПАРАЛЛЕЛИ
+    # Загрузка параллели
     # ================================================================
     def on_level_changed(self, index):
         self.current_level_groups = []
@@ -346,7 +486,9 @@ class CheckResultsTab5_9Online(QWidget):
 
         self.groups_thread = OnlineGroupsLoadThread(self.auth, level)
         self.groups_thread.log.connect(self.append_to_status)
-        self.groups_thread.finished.connect(lambda g: self.on_groups_loaded(g, level))
+        self.groups_thread.finished.connect(
+            lambda g: self.on_groups_loaded(g, level)
+        )
         self.groups_thread.error.connect(self.on_load_error)
         self.groups_thread.start()
 
@@ -395,15 +537,15 @@ class CheckResultsTab5_9Online(QWidget):
         sorted_classes = sorted(classes.items(), key=lambda x: (x[1] or ""))
         for cu_id, cu_name in sorted_classes:
             self.class_combo.addItem(cu_name or f"ID {cu_id}", cu_id)
-        self.class_combo.setEnabled(bool(classes))
 
+        self.class_combo.setEnabled(bool(classes))
         if not classes:
             self.append_to_status("⚠️ В параллели нет классов.")
         else:
             self.append_to_status(f"Найдено классов: {len(classes)}")
 
     # ================================================================
-    #  ВЫБОР КЛАССА → ЖУРНАЛЫ
+    # Выбор класса → журналы
     # ================================================================
     def on_class_changed(self, index):
         cu_id = self.class_combo.currentData()
@@ -415,15 +557,17 @@ class CheckResultsTab5_9Online(QWidget):
         if not cu_id:
             return
 
-        class_groups = [g for g in self.current_level_groups
-                        if g.get("class_unit_id") == cu_id]
+        class_groups = [
+            g for g in self.current_level_groups
+            if g.get("class_unit_id") == cu_id
+        ]
         if not class_groups:
             self.append_to_status("⚠️ Для класса нет журналов.")
             return
 
-        class_groups.sort(key=lambda x: (x.get("subject_name") or "",
-                                         x.get("name") or ""))
-
+        class_groups.sort(
+            key=lambda x: (x.get("subject_name") or "", x.get("name") or "")
+        )
         for g in class_groups:
             subj = g.get("subject_name") or ""
             gname = g.get("name") or ""
@@ -445,7 +589,7 @@ class CheckResultsTab5_9Online(QWidget):
         QMessageBox.critical(self, "Ошибка загрузки", err)
 
     # ================================================================
-    #  ПРОВЕРКА
+    # Проверка
     # ================================================================
     def check_results(self):
         if self._is_loading:
@@ -503,14 +647,12 @@ class CheckResultsTab5_9Online(QWidget):
                 period_mapping = PERIOD_MAPPING_TRIMESTERS
                 is_high = False
 
-            # Группируем отметки по ученику: {student_id: [marks...]}
             marks_by_student = defaultdict(list)
             for m in marks:
                 sid = m.get("student_profile_id")
                 if sid is not None:
                     marks_by_student[sid].append(m)
 
-            # Обрабатываем учеников
             for student in students:
                 sid = student.get("id")
                 self._process_student(
@@ -522,7 +664,6 @@ class CheckResultsTab5_9Online(QWidget):
 
             self.display_all_results()
             self.clear_filters()
-
             if self.all_results:
                 self.export_btn.setEnabled(True)
 
@@ -537,7 +678,7 @@ class CheckResultsTab5_9Online(QWidget):
             self.progress_bar.setRange(0, 100)
 
     # ================================================================
-    #  ОБРАБОТКА ОДНОГО УЧЕНИКА
+    # Обработка одного ученика
     # ================================================================
     def _process_student(self, student, student_marks,
                          class_name, subject_name,
@@ -545,12 +686,10 @@ class CheckResultsTab5_9Online(QWidget):
         final_marks_by_period = {}
         gpa_mark = ''
 
-        # 1. Итоговые отметки из student_profiles
         for mark in student.get('final_marks', []):
             period_id = mark.get('attestation_period_id')
             value_obj = mark.get('value', {})
             mark_type = mark.get('mark_type', '')
-
             if isinstance(value_obj, dict):
                 value = value_obj.get('parsedValue') or value_obj.get('source')
             else:
@@ -577,15 +716,10 @@ class CheckResultsTab5_9Online(QWidget):
 
             if period_id and period_id in period_mapping:
                 final_marks_by_period[period_mapping[period_id]] = mark_value
-
             if mark.get('is_year_mark'):
                 final_marks_by_period['Год'] = mark_value
 
-        # 2. Средние по отметкам за периоды
-        period_avgs = self._compute_period_averages(
-            student_marks, period_mapping
-        )
-
+        period_avgs = self._compute_period_averages(student_marks, period_mapping)
         fio = self._get_student_full_name(student)
 
         if is_high_school:
@@ -610,15 +744,11 @@ class CheckResultsTab5_9Online(QWidget):
                 period_avgs.get('Т2'),
                 period_avgs.get('Т3'),
             )
+
         if result:
             self.all_results.append(result)
 
     def _compute_period_averages(self, student_marks, period_mapping):
-        """
-        Считает средневзвешенный балл по каждому периоду.
-        Возвращает {"Т1": 4.25, "Т2": 4.10, ...} или пустой словарь.
-        """
-        # Границы периодов (жёсткие по триместрам, можно поменять)
         periods = {}
         now = datetime.now()
         if now.month >= 9:
@@ -640,11 +770,10 @@ class CheckResultsTab5_9Online(QWidget):
             elif name == 'П2':
                 periods[name] = (datetime(y2, 1, 1), datetime(y2, 5, 31))
 
-        # Разбираем отметки и распределяем по периодам
         period_values = defaultdict(list)
         for m in student_marks:
-            date_str = m.get("date")  # "18.09.2026"
-            name = m.get("name")      # "5"
+            date_str = m.get("date")
+            name = m.get("name")
             weight = m.get("weight") or 1
             if not date_str or name is None:
                 continue
@@ -654,7 +783,6 @@ class CheckResultsTab5_9Online(QWidget):
             except Exception:
                 continue
 
-            # Найти период
             pname = None
             for pn, (start, end) in periods.items():
                 if start <= dt <= end:
@@ -663,7 +791,6 @@ class CheckResultsTab5_9Online(QWidget):
             if not pname:
                 continue
 
-            # Парсим отметку
             try:
                 mark_int = int(name)
             except Exception:
@@ -672,10 +799,8 @@ class CheckResultsTab5_9Online(QWidget):
                 weight_int = int(weight)
             except Exception:
                 weight_int = 1
-
             period_values[pname].append((mark_int, weight_int))
 
-        # Считаем средневзвешенный
         result = {}
         for pname, lst in period_values.items():
             total_sum = sum(m * w for m, w in lst)
@@ -690,14 +815,17 @@ class CheckResultsTab5_9Online(QWidget):
         middle = student.get("middle_name", "")
         if not last and student.get("user_name"):
             parts = student.get("user_name", "").split()
-            if len(parts) >= 1: last = parts[0]
-            if len(parts) >= 2: first = parts[1]
-            if len(parts) >= 3: middle = parts[2]
+            if len(parts) >= 1:
+                last = parts[0]
+            if len(parts) >= 2:
+                first = parts[1]
+            if len(parts) >= 3:
+                middle = parts[2]
         parts = [p for p in (last, first, middle) if p]
         return " ".join(parts) if parts else student.get("short_name", "")
 
     # ================================================================
-    #  ЛОГИКА ПРОВЕРКИ
+    # Логика проверки
     # ================================================================
     def _safe_to_int_mark(self, val):
         if val is None:
@@ -714,7 +842,6 @@ class CheckResultsTab5_9Online(QWidget):
             return None
 
     def _get_expected_period_mark(self, avg_float):
-        """Промежуточные: ≥4.6→5, ≥3.6→4, ≥2.6→3, <2.6→А/З."""
         if avg_float >= 4.6:
             return 5
         elif avg_float >= 3.6:
@@ -725,7 +852,6 @@ class CheckResultsTab5_9Online(QWidget):
             return 'А/З'
 
     def _get_expected_year_mark(self, avg_float):
-        """Годовая: ≥4.5→5, ≥3.5→4, ≥2.5→3, <2.5→2."""
         if avg_float >= 4.5:
             return 5
         elif avg_float >= 3.5:
@@ -743,7 +869,6 @@ class CheckResultsTab5_9Online(QWidget):
         t3 = self._safe_to_int_mark(t3_val)
         gpa = self._safe_to_int_mark(gpa_val)
         year = self._safe_to_int_mark(year_val)
-
         return self._build_result(
             class_name, student_name, subject_name,
             period_fields=('Т1', 'Т2', 'Т3'),
@@ -761,7 +886,6 @@ class CheckResultsTab5_9Online(QWidget):
         p2 = self._safe_to_int_mark(p2_val)
         gpa = self._safe_to_int_mark(gpa_val)
         year = self._safe_to_int_mark(year_val)
-
         return self._build_result(
             class_name, student_name, subject_name,
             period_fields=('П1', 'П2'),
@@ -775,11 +899,9 @@ class CheckResultsTab5_9Online(QWidget):
     def _build_result(self, class_name, student_name, subject_name,
                       period_fields, period_values, period_avgs,
                       gpa, year, raw_period_values, gpa_raw, year_raw):
-        """Общий расчёт для 5-9 и 10-11."""
-
         missing_period = any(v is None for v in period_values)
-
         has_debt = has_npa = missing_gpa = False
+
         if gpa is None:
             missing_gpa = True
         elif isinstance(gpa, str) and gpa == 'А/З':
@@ -830,12 +952,9 @@ class CheckResultsTab5_9Online(QWidget):
             'status_type': status_type,
         }
 
-        # Периоды: выставленные + средние + статус расхождения
         for name, raw, avg in zip(period_fields, raw_period_values, period_avgs):
             result[f"{name.lower()}_avg"] = f"{avg:.2f}" if avg is not None else '-'
             result[f"{name.lower()}_mark"] = str(raw) if raw is not None else '-'
-
-            # Сравниваем с правилом
             if avg is not None and raw is not None:
                 expected = self._get_expected_period_mark(avg)
                 try:
@@ -852,7 +971,7 @@ class CheckResultsTab5_9Online(QWidget):
         return result
 
     # ================================================================
-    #  ТАБЛИЦА
+    # Таблица
     # ================================================================
     def display_all_results(self):
         if self.all_results:
@@ -862,27 +981,24 @@ class CheckResultsTab5_9Online(QWidget):
         try:
             self.results_table.setUpdatesEnabled(False)
             self.results_table.setSortingEnabled(False)
-
             if not results:
                 self.results_table.setRowCount(0)
                 self.results_table.setColumnCount(0)
                 return
 
             is_high = 'p1_mark' in results[0]
-
             if is_high:
                 headers = [
                     'Класс', 'Ученик', 'Предмет',
-                    'ср. П1', 'П1',
-                    'ср. П2', 'П2',
-                    'ГПА', 'ср. балл', 'ГОД должно', 'ГОД выст.', 'Статус'
+                    'ср. П1', 'П1', 'ср. П2', 'П2',
+                    'ГПА', 'ср. балл', 'ГОД должно', 'ГОД выст.', 'Статус',
                 ]
                 period_keys = ('p1', 'p2')
             else:
                 headers = [
                     'Класс', 'Ученик', 'Предмет',
                     'ср. Т1', 'Т1', 'ср. Т2', 'Т2', 'ср. Т3', 'Т3',
-                    'ГПА', 'ср. балл', 'ГОД должно', 'ГОД выст.', 'Статус'
+                    'ГПА', 'ср. балл', 'ГОД должно', 'ГОД выст.', 'Статус',
                 ]
                 period_keys = ('t1', 't2', 't3')
 
@@ -891,34 +1007,36 @@ class CheckResultsTab5_9Online(QWidget):
             self.results_table.setRowCount(len(results))
 
             red_bg = QColor(255, 180, 180)
-
             for i, r in enumerate(results):
                 col = 0
-                self.results_table.setItem(i, col, QTableWidgetItem(str(r.get('class', ''))))
-                col += 1
-                self.results_table.setItem(i, col, QTableWidgetItem(str(r.get('student', ''))))
-                col += 1
-                self.results_table.setItem(i, col, QTableWidgetItem(str(r.get('subject', ''))))
-                col += 1
+                self.results_table.setItem(
+                    i, col, QTableWidgetItem(str(r.get('class', '')))
+                ); col += 1
+                self.results_table.setItem(
+                    i, col, QTableWidgetItem(str(r.get('student', '')))
+                ); col += 1
+                self.results_table.setItem(
+                    i, col, QTableWidgetItem(str(r.get('subject', '')))
+                ); col += 1
 
                 for pk in period_keys:
-                    # ср. X
                     avg_item = QTableWidgetItem(str(r.get(f'{pk}_avg', '-')))
-                    self.results_table.setItem(i, col, avg_item)
-                    col += 1
-                    # X (выставленная)
+                    self.results_table.setItem(i, col, avg_item); col += 1
+
                     mark_item = QTableWidgetItem(str(r.get(f'{pk}_mark', '-')))
                     if r.get(f'{pk}_mismatch'):
                         mark_item.setBackground(red_bg)
-                    self.results_table.setItem(i, col, mark_item)
-                    col += 1
+                    self.results_table.setItem(i, col, mark_item); col += 1
 
-                self.results_table.setItem(i, col, QTableWidgetItem(str(r.get('gpa', '-'))))
-                col += 1
-                self.results_table.setItem(i, col, QTableWidgetItem(str(r.get('calculated', '-'))))
-                col += 1
-                self.results_table.setItem(i, col, QTableWidgetItem(str(r.get('calculated_mark', '-'))))
-                col += 1
+                self.results_table.setItem(
+                    i, col, QTableWidgetItem(str(r.get('gpa', '-')))
+                ); col += 1
+                self.results_table.setItem(
+                    i, col, QTableWidgetItem(str(r.get('calculated', '-')))
+                ); col += 1
+                self.results_table.setItem(
+                    i, col, QTableWidgetItem(str(r.get('calculated_mark', '-')))
+                ); col += 1
 
                 actual_item = QTableWidgetItem(str(r.get('actual_mark', '-')))
                 cm = str(r.get('calculated_mark', '-'))
@@ -929,39 +1047,41 @@ class CheckResultsTab5_9Online(QWidget):
                             actual_item.setBackground(red_bg)
                     except Exception:
                         pass
-                self.results_table.setItem(i, col, actual_item)
-                col += 1
+                self.results_table.setItem(i, col, actual_item); col += 1
 
                 status_item = QTableWidgetItem(str(r.get('status', '')))
                 st = r.get('status_type', '')
                 if st == 'match':
-                    status_item.setBackground(QColor(200, 255, 200))
+                    status_item.setBackground(QColor(209, 250, 229))
+                    status_item.setForeground(QColor(6, 95, 70))
                 elif st == 'mismatch':
-                    status_item.setBackground(QColor(255, 200, 200))
+                    status_item.setBackground(QColor(254, 202, 202))
+                    status_item.setForeground(QColor(153, 27, 27))
                 elif st == 'missing_gpa':
-                    status_item.setBackground(QColor(255, 255, 200))
+                    status_item.setBackground(QColor(254, 240, 138))
+                    status_item.setForeground(QColor(133, 77, 14))
                 elif st in ('debt', 'npa'):
-                    status_item.setBackground(QColor(255, 200, 150))
+                    status_item.setBackground(QColor(254, 215, 170))
+                    status_item.setForeground(QColor(124, 45, 18))
                 elif st == 'missing_data':
-                    status_item.setBackground(QColor(255, 220, 180))
+                    status_item.setBackground(QColor(226, 232, 240))
+                    status_item.setForeground(QColor(30, 41, 59))
                 self.results_table.setItem(i, col, status_item)
 
             self.results_table.resizeColumnsToContents()
             if self.results_table.columnCount() > 2:
-                self.results_table.setColumnWidth(0, 60)
-                self.results_table.setColumnWidth(1, 200)
-                self.results_table.setColumnWidth(2, 180)
-
+                self.results_table.setColumnWidth(0, 70)
+                self.results_table.setColumnWidth(1, 220)
+                self.results_table.setColumnWidth(2, 200)
         finally:
             self.results_table.setUpdatesEnabled(True)
 
     # ================================================================
-    #  ФИЛЬТРЫ
+    # Фильтры
     # ================================================================
     def apply_filter(self):
         if not self.all_results or self._is_loading:
             return
-
         student_f = self.filter_student.text().lower()
         status_f = self.filter_status.currentText()
 
@@ -984,7 +1104,7 @@ class CheckResultsTab5_9Online(QWidget):
         self.display_all_results()
 
     # ================================================================
-    #  ЭКСПОРТ
+    # Экспорт
     # ================================================================
     def export_to_excel(self):
         if not self.all_results:
@@ -992,7 +1112,6 @@ class CheckResultsTab5_9Online(QWidget):
             return
 
         is_high = 'p1_mark' in self.all_results[0]
-
         filename = (
             f"Проверка_итогов_online_"
             f"{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
@@ -1009,21 +1128,25 @@ class CheckResultsTab5_9Online(QWidget):
             ws.title = "Проверка итогов Online"
 
             if is_high:
-                headers = ['Класс', 'Ученик', 'Предмет',
-                           'ср. П1', 'П1', 'ср. П2', 'П2',
-                           'ГПА', 'ср. балл', 'ГОД должно', 'ГОД выст.', 'Статус']
+                headers = [
+                    'Класс', 'Ученик', 'Предмет',
+                    'ср. П1', 'П1', 'ср. П2', 'П2',
+                    'ГПА', 'ср. балл', 'ГОД должно', 'ГОД выст.', 'Статус',
+                ]
                 period_keys = ('p1', 'p2')
             else:
-                headers = ['Класс', 'Ученик', 'Предмет',
-                           'ср. Т1', 'Т1', 'ср. Т2', 'Т2', 'ср. Т3', 'Т3',
-                           'ГПА', 'ср. балл', 'ГОД должно', 'ГОД выст.', 'Статус']
+                headers = [
+                    'Класс', 'Ученик', 'Предмет',
+                    'ср. Т1', 'Т1', 'ср. Т2', 'Т2', 'ср. Т3', 'Т3',
+                    'ГПА', 'ср. балл', 'ГОД должно', 'ГОД выст.', 'Статус',
+                ]
                 period_keys = ('t1', 't2', 't3')
 
             ws.append(headers)
 
             header_font = Font(bold=True, color="FFFFFF", size=10)
             header_fill = PatternFill(
-                start_color="4CAF50", end_color="4CAF50", fill_type="solid"
+                start_color="059669", end_color="059669", fill_type="solid"
             )
             header_align = Alignment(
                 horizontal='center', vertical='center', wrap_text=True
@@ -1037,9 +1160,10 @@ class CheckResultsTab5_9Online(QWidget):
             red_fill = PatternFill(
                 start_color="FFB4B4", end_color="FFB4B4", fill_type="solid"
             )
-
             for r in self.all_results:
-                row = [r.get('class', ''), r.get('student', ''), r.get('subject', '')]
+                row = [
+                    r.get('class', ''), r.get('student', ''), r.get('subject', ''),
+                ]
                 for pk in period_keys:
                     row.append(r.get(f'{pk}_avg', '-'))
                     row.append(r.get(f'{pk}_mark', '-'))
@@ -1050,7 +1174,6 @@ class CheckResultsTab5_9Online(QWidget):
                 row.append(r.get('status', ''))
                 ws.append(row)
 
-            # Подсветка годовой
             actual_col_idx = len(headers) - 1
             calculated_col_idx = actual_col_idx - 1
             for row_idx in range(2, ws.max_row + 1):
@@ -1066,7 +1189,6 @@ class CheckResultsTab5_9Online(QWidget):
             last_letter = get_column_letter(len(headers))
             ws.auto_filter.ref = f"A1:{last_letter}{ws.max_row}"
             ws.freeze_panes = 'A2'
-
             ws.column_dimensions['A'].width = 8
             ws.column_dimensions['B'].width = 30
             ws.column_dimensions['C'].width = 25
@@ -1077,10 +1199,9 @@ class CheckResultsTab5_9Online(QWidget):
             reply = QMessageBox.question(
                 self, "Готово",
                 f"Отчёт сохранён:\n{file_path}\n\nОткрыть файл?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             )
             if reply == QMessageBox.StandardButton.Yes:
                 os.startfile(file_path)
-
         except Exception as e:
             QMessageBox.critical(self, "Ошибка", f"Не удалось сохранить:\n{e}")

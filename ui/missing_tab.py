@@ -11,13 +11,128 @@ from datetime import datetime, timedelta
 from PySide6.QtWidgets import *
 from PySide6.QtCore import *
 from PySide6.QtGui import *
-
 from ui.console import ConsoleWidget
 
 
-class MissingTab(QWidget):
-    """Вкладка для просмотра и выгрузки пропусков занятий"""
+# ============================================================
+# Единый стиль (оранжевый акцент — пропуски)
+# ============================================================
+TAB_STYLE = """
+    QWidget {
+        font-size: 10pt;
+        color: #1e293b;
+    }
+    QGroupBox {
+        font-size: 11pt;
+        font-weight: 700;
+        color: #c2410c;
+        border: 1px solid #fdba74;
+        border-radius: 10px;
+        margin-top: 12px;
+        padding: 18px 14px 14px 14px;
+        background: #ffffff;
+    }
+    QGroupBox::title {
+        subcontrol-origin: margin;
+        left: 12px;
+        padding: 0 6px;
+    }
+    QLineEdit {
+        min-height: 30px;
+        padding: 2px 8px;
+        border: 1px solid #cbd5e1;
+        border-radius: 5px;
+        background: #ffffff;
+    }
+    QLineEdit:focus { border: 1px solid #ea580c; }
+    QLineEdit:disabled {
+        background: #f1f5f9;
+        color: #94a3b8;
+    }
+    QPushButton {
+        min-height: 30px;
+        padding: 4px 12px;
+        border: 1px solid #cbd5e1;
+        border-radius: 5px;
+        background: #f8fafc;
+        color: #1e293b;
+        font-weight: 500;
+    }
+    QPushButton:hover { background: #e2e8f0; }
+    QPushButton:pressed { background: #cbd5e1; }
+    QPushButton:disabled {
+        background: #f1f5f9;
+        color: #94a3b8;
+        border-color: #e2e8f0;
+    }
+    QComboBox {
+        min-height: 30px;
+        padding: 2px 8px;
+        border: 1px solid #cbd5e1;
+        border-radius: 5px;
+        background: #ffffff;
+    }
+    QDateEdit {
+        min-height: 30px;
+        padding: 2px 8px;
+        border: 1px solid #cbd5e1;
+        border-radius: 5px;
+        background: #ffffff;
+    }
+    QDateEdit:focus { border: 1px solid #ea580c; }
+    QTableWidget {
+        border: 1px solid #e2e8f0;
+        border-radius: 6px;
+        gridline-color: #e2e8f0;
+        alternate-background-color: #fff7ed;
+    }
+    QTableWidget::item { padding: 3px 6px; }
+    QHeaderView::section {
+        background: #f1f5f9;
+        color: #1e293b;
+        padding: 5px;
+        border: none;
+        border-right: 1px solid #e2e8f0;
+        border-bottom: 1px solid #e2e8f0;
+        font-weight: 600;
+    }
+    QLabel { color: #334155; }
+"""
 
+PRIMARY_BTN = """
+    QPushButton {
+        background-color: #ea580c;
+        color: #ffffff;
+        font-weight: 700;
+        border: none;
+        border-radius: 7px;
+    }
+    QPushButton:hover { background-color: #c2410c; }
+    QPushButton:pressed { background-color: #9a3412; }
+    QPushButton:disabled {
+        background-color: #cbd5e1;
+        color: #64748b;
+    }
+"""
+
+SUCCESS_BTN = """
+    QPushButton {
+        background-color: #059669;
+        color: #ffffff;
+        font-weight: 600;
+        border: none;
+        border-radius: 6px;
+    }
+    QPushButton:hover { background-color: #047857; }
+    QPushButton:disabled {
+        background-color: #cbd5e1;
+        color: #64748b;
+    }
+"""
+
+
+class MissingTab(QWidget):
+    """Вкладка для просмотра и выгрузки пропусков занятий."""
     log_signal = Signal(str)
 
     def __init__(self, parent):
@@ -31,20 +146,32 @@ class MissingTab(QWidget):
         self.selected_class = None
         self.missing_data = []
         self.initUI()
-
         self.log_signal.connect(self.append_to_console)
 
-    # ------------------------------------------------------------------
     def initUI(self):
         main_layout = QVBoxLayout(self)
-        main_layout.setSpacing(10)
-        main_layout.setContentsMargins(15, 15, 15, 15)
+        main_layout.setSpacing(12)
+        main_layout.setContentsMargins(16, 14, 16, 14)
+
+        # === Заголовок ===
+        title = QLabel("📊  Пропуски занятий")
+        title.setStyleSheet(
+            "font-size: 16pt; font-weight: 700; color: #0f172a; padding: 2px 0 6px 0;"
+        )
+        main_layout.addWidget(title)
+
+        subtitle = QLabel(
+            "Выберите ученика и период, чтобы получить детализацию пропусков."
+        )
+        subtitle.setWordWrap(True)
+        subtitle.setStyleSheet("color: #64748b; margin-bottom: 4px;")
+        main_layout.addWidget(subtitle)
 
         # === ВЕРХНЯЯ ПАНЕЛЬ: ВЫБОР КЛАССА И УЧЕНИКА ===
-        selector_group = QGroupBox("Выбор ученика и периода")
+        selector_group = QGroupBox("🎯  Выбор ученика и периода")
         selector_layout = QGridLayout(selector_group)
         selector_layout.setVerticalSpacing(10)
-        selector_layout.setHorizontalSpacing(15)
+        selector_layout.setHorizontalSpacing(12)
 
         # --- Строка 1: Параллель / Класс / Ученик ---
         selector_layout.addWidget(QLabel("Параллель:"), 0, 0)
@@ -66,18 +193,16 @@ class MissingTab(QWidget):
         self.student_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
         self.student_combo.currentTextChanged.connect(self.on_student_changed)
         selector_layout.addWidget(self.student_combo, 0, 5)
-
         selector_layout.setColumnStretch(5, 1)
 
         # --- Строка 2: Период (с / по) ---
         selector_layout.addWidget(QLabel("Период с:"), 1, 0)
-
         self.start_date_edit = QDateEdit()
         self.start_date_edit.setCalendarPopup(True)
         self.start_date_edit.setDisplayFormat("dd.MM.yyyy")
         self.start_date_edit.setMinimumHeight(32)
         self.start_date_edit.setMinimumWidth(130)
-        # По умолчанию — 1 сентября текущего учебного года
+
         today = datetime.now()
         if today.month >= 9:
             default_start = QDate(today.year, 9, 1)
@@ -87,13 +212,11 @@ class MissingTab(QWidget):
         selector_layout.addWidget(self.start_date_edit, 1, 1)
 
         selector_layout.addWidget(QLabel("по:"), 1, 2)
-
         self.end_date_edit = QDateEdit()
         self.end_date_edit.setCalendarPopup(True)
         self.end_date_edit.setDisplayFormat("dd.MM.yyyy")
         self.end_date_edit.setMinimumHeight(32)
         self.end_date_edit.setMinimumWidth(130)
-        # По умолчанию — сегодня
         self.end_date_edit.setDate(QDate.currentDate())
         selector_layout.addWidget(self.end_date_edit, 1, 3)
 
@@ -101,116 +224,144 @@ class MissingTab(QWidget):
         period_btn_layout = QHBoxLayout()
         period_btn_layout.setSpacing(6)
 
-        self.period_t1_btn = QPushButton("Т1")
-        self.period_t1_btn.setToolTip("Сентябрь – Ноябрь")
-        self.period_t1_btn.setMaximumWidth(50)
-        self.period_t1_btn.clicked.connect(lambda: self._set_period("Т1"))
-        period_btn_layout.addWidget(self.period_t1_btn)
-
-        self.period_t2_btn = QPushButton("Т2")
-        self.period_t2_btn.setToolTip("Декабрь – Февраль")
-        self.period_t2_btn.setMaximumWidth(50)
-        self.period_t2_btn.clicked.connect(lambda: self._set_period("Т2"))
-        period_btn_layout.addWidget(self.period_t2_btn)
-
-        self.period_t3_btn = QPushButton("Т3")
-        self.period_t3_btn.setToolTip("Март – Май")
-        self.period_t3_btn.setMaximumWidth(50)
-        self.period_t3_btn.clicked.connect(lambda: self._set_period("Т3"))
-        period_btn_layout.addWidget(self.period_t3_btn)
-
-        self.period_p1_btn = QPushButton("П1")
-        self.period_p1_btn.setToolTip("Сентябрь – Декабрь")
-        self.period_p1_btn.setMaximumWidth(50)
-        self.period_p1_btn.clicked.connect(lambda: self._set_period("П1"))
-        period_btn_layout.addWidget(self.period_p1_btn)
-
-        self.period_p2_btn = QPushButton("П2")
-        self.period_p2_btn.setToolTip("Январь – Май")
-        self.period_p2_btn.setMaximumWidth(50)
-        self.period_p2_btn.clicked.connect(lambda: self._set_period("П2"))
-        period_btn_layout.addWidget(self.period_p2_btn)
-
-        self.period_year_btn = QPushButton("Год")
-        self.period_year_btn.setToolTip("Весь учебный год")
-        self.period_year_btn.setMaximumWidth(60)
-        self.period_year_btn.clicked.connect(lambda: self._set_period("Год"))
-        period_btn_layout.addWidget(self.period_year_btn)
+        period_styles = [
+            ("Т1", "Сен-Ноя", "#1d4ed8", "#eff6ff"),
+            ("Т2", "Дек-Фев", "#7c3aed", "#f5f3ff"),
+            ("Т3", "Мар-Май", "#059669", "#ecfdf5"),
+            ("П1", "Сен-Дек", "#0369a1", "#f0f9ff"),
+            ("П2", "Янв-Май", "#c2410c", "#fff7ed"),
+            ("Год", "Весь год", "#475569", "#f8fafc"),
+        ]
+        self._period_buttons = []
+        for code, tooltip, color, bg in period_styles:
+            btn = QPushButton(code)
+            btn.setToolTip(tooltip)
+            btn.setMaximumWidth(60)
+            btn.setMinimumHeight(30)
+            btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: {bg};
+                    color: {color};
+                    border: 1px solid {color}40;
+                    font-weight: 700;
+                    font-size: 10pt;
+                }}
+                QPushButton:hover {{
+                    background: {color};
+                    color: #ffffff;
+                }}
+            """)
+            btn.clicked.connect(lambda _, c=code: self._set_period(c))
+            period_btn_layout.addWidget(btn)
+            self._period_buttons.append(btn)
 
         period_btn_widget = QWidget()
         period_btn_widget.setLayout(period_btn_layout)
         selector_layout.addWidget(period_btn_widget, 1, 4, 1, 2)
 
         # --- Строка 3: Кнопка загрузки ---
-        self.load_btn = QPushButton("📥 Загрузить пропуски")
+        self.load_btn = QPushButton("📥  Загрузить пропуски")
         self.load_btn.setEnabled(False)
-        self.load_btn.setMinimumHeight(34)
-        self.load_btn.setStyleSheet("""
-            QPushButton { background-color: #2196F3; color: white;
-                font-weight: bold; border-radius: 5px; }
-            QPushButton:hover { background-color: #1976D2; }
-            QPushButton:disabled { background-color: #cccccc; color: #666666; }
-        """)
+        self.load_btn.setMinimumHeight(40)
+        self.load_btn.setStyleSheet(
+            PRIMARY_BTN + "QPushButton { font-size: 11pt; }"
+        )
         self.load_btn.clicked.connect(self.load_missing_data)
         selector_layout.addWidget(self.load_btn, 2, 0, 1, 2)
 
         period_hint = QLabel(
-            "ℹ️ Выберите даты вручную или нажмите Т1/Т2/Т3/П1/П2/Год "
+            "ℹ️  Выберите даты вручную или нажмите Т1/Т2/Т3/П1/П2/Год "
             "для быстрой установки периода."
         )
-        period_hint.setStyleSheet("color: #666; font-size: 9pt;")
+        period_hint.setStyleSheet("color: #64748b; font-size: 9pt;")
         period_hint.setWordWrap(True)
         selector_layout.addWidget(period_hint, 2, 2, 1, 4)
 
         main_layout.addWidget(selector_group)
 
         # === ОСНОВНАЯ ИНФОРМАЦИЯ ОБ УЧЕНИКЕ ===
-        info_group = QGroupBox("Информация об ученике")
+        info_group = QGroupBox("👤  Информация об ученике")
+        info_group.setStyleSheet("""
+            QGroupBox {
+                font-size: 11pt; font-weight: 700;
+                color: #0f172a;
+                border: 1px solid #cbd5e1;
+                border-radius: 10px;
+                margin-top: 12px;
+                padding: 18px 14px 14px 14px;
+                background: #f8fafc;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 12px; padding: 0 6px;
+            }
+        """)
         info_layout = QHBoxLayout(info_group)
-
         self.student_info_label = QLabel("Ученик не выбран")
-        self.student_info_label.setStyleSheet("font-size: 12pt; font-weight: bold; color: #2c3e50;")
+        self.student_info_label.setStyleSheet(
+            "font-size: 12pt; font-weight: 700; color: #0f172a;"
+        )
         info_layout.addWidget(self.student_info_label)
 
         self.total_missing_label = QLabel("Всего пропусков: 0")
-        self.total_missing_label.setStyleSheet("color: #e74c3c; font-weight: bold;")
+        self.total_missing_label.setStyleSheet("""
+            color: #dc2626;
+            background: #fef2f2;
+            border: 1px solid #fecaca;
+            border-radius: 6px;
+            padding: 6px 12px;
+            font-weight: 700;
+            font-size: 10.5pt;
+        """)
         info_layout.addWidget(self.total_missing_label)
-
         info_layout.addStretch()
         main_layout.addWidget(info_group)
 
-        # === ТАБЛИЦА ПРЕДМЕТОВ С КОЛИЧЕСТВОМ ПРОПУСКОВ ===
+        # === ТАБЛИЦА ПРЕДМЕТОВ ===
+        subjects_label = QLabel("📚  Пропуски по предметам:")
+        subjects_label.setStyleSheet(
+            "font-size: 11pt; font-weight: 700; color: #c2410c; padding: 4px 0;"
+        )
+        main_layout.addWidget(subjects_label)
+
         self.subjects_table = QTableWidget()
         self.subjects_table.setAlternatingRowColors(True)
-        self.subjects_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self.subjects_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.subjects_table.setSelectionBehavior(
+            QTableWidget.SelectionBehavior.SelectRows
+        )
+        self.subjects_table.setEditTriggers(
+            QTableWidget.EditTrigger.NoEditTriggers
+        )
         self.subjects_table.horizontalHeader().setStretchLastSection(True)
-        self.subjects_table.setMinimumHeight(200)
+        self.subjects_table.setMinimumHeight(180)
+        main_layout.addWidget(self.subjects_table)
 
-        subjects_layout = QVBoxLayout()
-        subjects_layout.addWidget(QLabel("📚 Пропуски по предметам:"))
-        subjects_layout.addWidget(self.subjects_table)
-        main_layout.addLayout(subjects_layout)
-
-        # === ТАБЛИЦА ПРОПУСКОВ С ДЕТАЛИЗАЦИЕЙ ===
-        details_group = QGroupBox("📋 Детализация пропусков")
+        # === ТАБЛИЦА ДЕТАЛИЗАЦИИ ===
+        details_group = QGroupBox("📋  Детализация пропусков")
         details_layout = QVBoxLayout(details_group)
 
         button_bar = QHBoxLayout()
         self.filter_edit = QLineEdit()
-        self.filter_edit.setPlaceholderText("🔍 Фильтр по предмету...")
+        self.filter_edit.setPlaceholderText("🔍  Фильтр по предмету...")
         self.filter_edit.textChanged.connect(self.filter_details_table)
         button_bar.addWidget(self.filter_edit)
-
         button_bar.addStretch()
 
-        self.export_csv_btn = QPushButton("📎 Экспорт в CSV")
+        self.export_csv_btn = QPushButton("📎  Экспорт в CSV")
         self.export_csv_btn.setEnabled(False)
+        self.export_csv_btn.setStyleSheet("""
+            QPushButton {
+                background: #f1f5f9; color: #334155;
+                border: 1px solid #cbd5e1; font-weight: 600;
+            }
+            QPushButton:hover { background: #e2e8f0; }
+        """)
         self.export_csv_btn.clicked.connect(self.export_to_csv)
         button_bar.addWidget(self.export_csv_btn)
 
-        self.export_excel_btn = QPushButton("📊 Экспорт в Excel")
+        self.export_excel_btn = QPushButton("📊  Экспорт в Excel")
         self.export_excel_btn.setEnabled(False)
+        self.export_excel_btn.setStyleSheet(SUCCESS_BTN)
         self.export_excel_btn.clicked.connect(self.export_to_excel)
         button_bar.addWidget(self.export_excel_btn)
 
@@ -218,8 +369,12 @@ class MissingTab(QWidget):
 
         self.details_table = QTableWidget()
         self.details_table.setAlternatingRowColors(True)
-        self.details_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self.details_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.details_table.setSelectionBehavior(
+            QTableWidget.SelectionBehavior.SelectRows
+        )
+        self.details_table.setEditTriggers(
+            QTableWidget.EditTrigger.NoEditTriggers
+        )
         self.details_table.horizontalHeader().setStretchLastSection(True)
         details_layout.addWidget(self.details_table)
 
@@ -227,9 +382,9 @@ class MissingTab(QWidget):
 
         # === КОНСОЛЬ ===
         self.console = ConsoleWidget()
-        self.console.setMaximumHeight(120)
         main_layout.addWidget(self.console)
 
+        self.setStyleSheet(TAB_STYLE)
         self.set_controls_enabled(False)
 
     # ------------------------------------------------------------------
@@ -239,16 +394,12 @@ class MissingTab(QWidget):
         self.student_combo.setEnabled(enabled)
         self.start_date_edit.setEnabled(enabled)
         self.end_date_edit.setEnabled(enabled)
-        self.period_t1_btn.setEnabled(enabled)
-        self.period_t2_btn.setEnabled(enabled)
-        self.period_t3_btn.setEnabled(enabled)
-        self.period_p1_btn.setEnabled(enabled)
-        self.period_p2_btn.setEnabled(enabled)
-        self.period_year_btn.setEnabled(enabled)
+        for btn in self._period_buttons:
+            btn.setEnabled(enabled)
         self.load_btn.setEnabled(enabled and self.selected_student is not None)
 
     # ==================================================================
-    #  АВТОРИЗАЦИЯ ИЗ MAINWINDOW
+    # Авторизация
     # ==================================================================
     def on_auth_updated(self, auth):
         self.auth = auth
@@ -265,29 +416,24 @@ class MissingTab(QWidget):
             self.auth.curr_aid = str(aid)
             self.load_classes()
 
-    # ------------------------------------------------------------------
     def load_classes(self):
         self.log_signal.emit("📚 Загрузка списка классов...")
-
         from collector import MarksDataCollector
         collector = MarksDataCollector(self.auth)
         self.classes_list = collector.get_classes()
-
         if not self.classes_list:
             self.log_signal.emit("⚠️ Не удалось загрузить список классов")
             return
-
-        levels = sorted(set(c["level"] for c in self.classes_list if 1 <= c["level"] <= 11))
-
+        levels = sorted(
+            set(c["level"] for c in self.classes_list if 1 <= c["level"] <= 11)
+        )
         self.level_combo.clear()
         self.level_combo.addItem("Выберите параллель", None)
         for level in levels:
             self.level_combo.addItem(f"{level} класс", level)
-
         self.set_controls_enabled(True)
         self.log_signal.emit(f"✅ Загружено классов: {len(self.classes_list)}")
 
-    # ------------------------------------------------------------------
     def on_level_changed(self, index):
         self.class_combo.clear()
         self.class_combo.addItem("Выберите класс", None)
@@ -300,8 +446,9 @@ class MissingTab(QWidget):
         level_data = self.level_combo.currentData()
         if not level_data:
             return
-
-        filtered_classes = [c for c in self.classes_list if c["level"] == level_data]
+        filtered_classes = [
+            c for c in self.classes_list if c["level"] == level_data
+        ]
         for class_info in filtered_classes:
             self.class_combo.addItem(class_info["name"], class_info)
 
@@ -319,14 +466,16 @@ class MissingTab(QWidget):
             return
 
         self.selected_class = class_info
-        self.log_signal.emit(f"👥 Загрузка учеников класса {class_info['name']}...")
-
+        self.log_signal.emit(
+            f"👥 Загрузка учеников класса {class_info['name']}..."
+        )
         from collector import MarksDataCollector
         collector = MarksDataCollector(self.auth)
-
         groups = collector.get_groups_for_class(class_info["id"])
         if groups:
-            students = collector.get_students_for_group(groups[0]["id"], class_info["id"])
+            students = collector.get_students_for_group(
+                groups[0]["id"], class_info["id"]
+            )
             if students:
                 self.student_combo.clear()
                 for student in students:
@@ -334,7 +483,6 @@ class MissingTab(QWidget):
                     self.student_combo.addItem(full_name, student)
                 self.log_signal.emit(f"✅ Загружено учеников: {len(students)}")
                 return
-
         self.student_combo.clear()
         self.student_combo.addItem("Не удалось загрузить учеников", None)
         self.log_signal.emit("⚠️ Не удалось загрузить список учеников")
@@ -343,7 +491,6 @@ class MissingTab(QWidget):
         last_name = student.get("last_name", "")
         first_name = student.get("first_name", "")
         middle_name = student.get("middle_name", "")
-
         if not last_name and student.get("user_name"):
             parts = student.get("user_name", "").split()
             if len(parts) >= 1:
@@ -352,7 +499,6 @@ class MissingTab(QWidget):
                 first_name = parts[1]
             if len(parts) >= 3:
                 middle_name = parts[2]
-
         name_parts = [p for p in [last_name, first_name, middle_name] if p]
         return " ".join(name_parts) if name_parts else student.get("short_name", "")
 
@@ -362,22 +508,20 @@ class MissingTab(QWidget):
             self.selected_student = None
             self.load_btn.setEnabled(False)
             return
-
         student_data = self.student_combo.currentData()
         if student_data:
             self.selected_student = student_data
             self.selected_student_name = self.student_combo.currentText()
-            self.student_info_label.setText(f"👤 {self.selected_student_name}")
+            self.student_info_label.setText(f"👤  {self.selected_student_name}")
             self.load_btn.setEnabled(True)
         else:
             self.selected_student = None
             self.load_btn.setEnabled(False)
 
     # ==================================================================
-    #  БЫСТРАЯ УСТАНОВКА ПЕРИОДА
+    # Быстрая установка периода
     # ==================================================================
     def _set_period(self, period_type: str):
-        """Устанавливает даты в полях в соответствии с выбранным периодом."""
         today = datetime.now()
         if today.month >= 9:
             academic_start = today.year
@@ -385,7 +529,6 @@ class MissingTab(QWidget):
             academic_start = today.year - 1
         academic_end = academic_start + 1
 
-        # Периоды в формате (день, месяц) — как в academic_calendar.py
         periods = {
             "Т1": ((1, 9, academic_start), (30, 11, academic_start)),
             "Т2": ((1, 12, academic_start), (28, 2, academic_end)),
@@ -394,12 +537,10 @@ class MissingTab(QWidget):
             "П2": ((1, 1, academic_end), (31, 5, academic_end)),
             "Год": ((1, 9, academic_start), (31, 5, academic_end)),
         }
-
         if period_type not in periods:
             return
 
         (sd, sm, sy), (ed, em, ey) = periods[period_type]
-
         try:
             start_qdate = QDate(sy, sm, sd)
             end_qdate = QDate(ey, em, ed)
@@ -407,13 +548,16 @@ class MissingTab(QWidget):
             self.end_date_edit.setDate(end_qdate)
             self.log_signal.emit(
                 f"[i] Установлен период {period_type}: "
-                f"{start_qdate.toString('dd.MM.yyyy')} — {end_qdate.toString('dd.MM.yyyy')}"
+                f"{start_qdate.toString('dd.MM.yyyy')} — "
+                f"{end_qdate.toString('dd.MM.yyyy')}"
             )
         except Exception as e:
-            self.log_signal.emit(f"⚠️ Не удалось установить период {period_type}: {e}")
+            self.log_signal.emit(
+                f"⚠️ Не удалось установить период {period_type}: {e}"
+            )
 
     # ==================================================================
-    #  ЗАГРУЗКА ПРОПУСКОВ
+    # Загрузка пропусков
     # ==================================================================
     def load_missing_data(self):
         if not self.selected_student or not self.auth:
@@ -423,7 +567,6 @@ class MissingTab(QWidget):
         start_date = self.start_date_edit.date().toString("dd.MM.yyyy")
         end_date = self.end_date_edit.date().toString("dd.MM.yyyy")
 
-        # Проверка, что начало не позже конца
         try:
             d1 = datetime.strptime(start_date, "%d.%m.%Y")
             d2 = datetime.strptime(end_date, "%d.%m.%Y")
@@ -440,26 +583,27 @@ class MissingTab(QWidget):
         self.load_btn.setEnabled(False)
         self.export_csv_btn.setEnabled(False)
         self.export_excel_btn.setEnabled(False)
-        self.log_signal.emit(f"📅 Загрузка пропусков за период: {start_date} - {end_date}")
-        self.log_signal.emit(f"👤 Ученик: {self.selected_student_name}")
 
+        self.log_signal.emit(
+            f"📅 Загрузка пропусков за период: {start_date} - {end_date}"
+        )
+        self.log_signal.emit(f"👤 Ученик: {self.selected_student_name}")
         self.missing_data = []
+
         current_date = datetime.strptime(start_date, "%d.%m.%Y")
         end_date_obj = datetime.strptime(end_date, "%d.%m.%Y")
-
         profile_id = self.auth.pid
         student_id = self.selected_student.get("id")
-
         total_days = (end_date_obj - current_date).days + 1
         processed = 0
 
         while current_date <= end_date_obj:
             date_str = current_date.strftime("%d.%m.%Y")
             processed += 1
-
             if processed % 10 == 0 or processed == total_days:
-                self.log_signal.emit(f"⏳ Обработка: {processed}/{total_days} дней")
-
+                self.log_signal.emit(
+                    f"⏳ Обработка: {processed}/{total_days} дней"
+                )
             data = self.fetch_missing_for_date(date_str, profile_id, student_id)
             if data:
                 for item in data:
@@ -468,10 +612,11 @@ class MissingTab(QWidget):
                         "subject": item.get("subject_name", ""),
                         "teacher": item.get("teacher_fio", ""),
                         "topic": item.get("lesson_topic", ""),
-                        "reason": item.get("nonattendance_reason_name", "Не указано"),
-                        "teacher_id": item.get("teacher_id")
+                        "reason": item.get(
+                            "nonattendance_reason_name", "Не указано"
+                        ),
+                        "teacher_id": item.get("teacher_id"),
                     })
-
             current_date += timedelta(days=1)
             QApplication.processEvents()
 
@@ -482,21 +627,21 @@ class MissingTab(QWidget):
     def fetch_missing_for_date(self, date_str, profile_id, student_id):
         if not self.auth:
             return []
-
         try:
             url = "https://dnevnik.mos.ru/reports/api/missing/by_student/json"
             params = {
                 "date": date_str,
                 "pid": profile_id,
-                "student_id": student_id
+                "student_id": student_id,
             }
-
             response = self.auth.fetch(url, params)
             if response and isinstance(response, list):
                 return response
             return []
         except Exception as e:
-            self.log_signal.emit(f"⚠️ Ошибка при загрузке {date_str}: {str(e)}")
+            self.log_signal.emit(
+                f"⚠️ Ошибка при загрузке {date_str}: {str(e)}"
+            )
             return []
 
     # ------------------------------------------------------------------
@@ -505,7 +650,10 @@ class MissingTab(QWidget):
             self.subjects_table.setRowCount(0)
             self.details_table.setRowCount(0)
             self.total_missing_label.setText("Всего пропусков: 0")
-            QMessageBox.information(self, "Информация", "Пропусков за выбранный период не найдено")
+            QMessageBox.information(
+                self, "Информация",
+                "Пропусков за выбранный период не найдено"
+            )
             return
 
         total = len(self.missing_data)
@@ -516,33 +664,58 @@ class MissingTab(QWidget):
             subjects_count[item["subject"]] += 1
 
         self.subjects_table.setColumnCount(2)
-        self.subjects_table.setHorizontalHeaderLabels(["Предмет", "Количество пропусков"])
+        self.subjects_table.setHorizontalHeaderLabels(
+            ["Предмет", "Количество пропусков"]
+        )
         self.subjects_table.setRowCount(len(subjects_count))
 
-        for i, (subject, count) in enumerate(sorted(subjects_count.items(), key=lambda x: x[1], reverse=True)):
-            self.subjects_table.setItem(i, 0, QTableWidgetItem(subject))
-            self.subjects_table.setItem(i, 1, QTableWidgetItem(str(count)))
+        for i, (subject, count) in enumerate(
+            sorted(subjects_count.items(), key=lambda x: x[1], reverse=True)
+        ):
+            self.subjects_table.setItem(
+                i, 0, QTableWidgetItem(subject)
+            )
+            count_item = QTableWidgetItem(str(count))
+            count_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            if count >= 5:
+                count_item.setBackground(QColor(254, 202, 202))
+                count_item.setForeground(QColor(153, 27, 27))
+            elif count >= 2:
+                count_item.setBackground(QColor(254, 240, 138))
+                count_item.setForeground(QColor(133, 77, 14))
+            self.subjects_table.setItem(i, 1, count_item)
 
         self.subjects_table.resizeColumnsToContents()
-        self.subjects_table.setColumnWidth(0, 250)
+        self.subjects_table.setColumnWidth(0, 300)
 
         self.display_details_table(self.missing_data)
         self.export_csv_btn.setEnabled(True)
         self.export_excel_btn.setEnabled(True)
 
     def display_details_table(self, data):
-        headers = ["Дата", "Предмет", "Учитель", "Тема урока", "Причина пропуска"]
-
+        headers = [
+            "Дата", "Предмет", "Учитель", "Тема урока", "Причина пропуска"
+        ]
         self.details_table.setColumnCount(len(headers))
         self.details_table.setHorizontalHeaderLabels(headers)
         self.details_table.setRowCount(len(data))
 
         for i, item in enumerate(data):
-            self.details_table.setItem(i, 0, QTableWidgetItem(item["date"]))
-            self.details_table.setItem(i, 1, QTableWidgetItem(item["subject"]))
-            self.details_table.setItem(i, 2, QTableWidgetItem(item["teacher"]))
-            self.details_table.setItem(i, 3, QTableWidgetItem(item["topic"]))
-            self.details_table.setItem(i, 4, QTableWidgetItem(item["reason"]))
+            self.details_table.setItem(
+                i, 0, QTableWidgetItem(item["date"])
+            )
+            self.details_table.setItem(
+                i, 1, QTableWidgetItem(item["subject"])
+            )
+            self.details_table.setItem(
+                i, 2, QTableWidgetItem(item["teacher"])
+            )
+            self.details_table.setItem(
+                i, 3, QTableWidgetItem(item["topic"])
+            )
+            self.details_table.setItem(
+                i, 4, QTableWidgetItem(item["reason"])
+            )
 
         self.details_table.resizeColumnsToContents()
         self.details_table.setColumnWidth(0, 100)
@@ -554,35 +727,42 @@ class MissingTab(QWidget):
         filter_text = self.filter_edit.text().lower()
         if not filter_text:
             self.display_details_table(self.missing_data)
+            self.total_missing_label.setText(
+                f"Всего пропусков: {len(self.missing_data)}"
+            )
             return
-
-        filtered = [item for item in self.missing_data if filter_text in item["subject"].lower()]
+        filtered = [
+            item for item in self.missing_data
+            if filter_text in item["subject"].lower()
+        ]
         self.display_details_table(filtered)
-        self.total_missing_label.setText(f"Показано: {len(filtered)} из {len(self.missing_data)} пропусков")
+        self.total_missing_label.setText(
+            f"Показано: {len(filtered)} из {len(self.missing_data)} пропусков"
+        )
 
     # ------------------------------------------------------------------
     def export_to_csv(self):
         if not self.missing_data:
             QMessageBox.warning(self, "Ошибка", "Нет данных для экспорта!")
             return
-
-        class_name = self.selected_class["name"] if self.selected_class else "unknown"
+        class_name = (
+            self.selected_class["name"] if self.selected_class else "unknown"
+        )
         student_name = self.selected_student_name.replace(" ", "_")
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"Пропуски_{class_name}_{student_name}_{timestamp}.csv"
-
         file_path, _ = QFileDialog.getSaveFileName(
             self, "Сохранить CSV", filename, "CSV files (*.csv)"
         )
-
         if not file_path:
             return
-
         try:
             with open(file_path, 'w', newline='', encoding='utf-8-sig') as f:
                 writer = csv.writer(f, delimiter=';')
-                writer.writerow(["Класс", "ФИО ученика", "Дата", "Предмет", "Учитель", "Тема урока", "Причина пропуска"])
-
+                writer.writerow([
+                    "Класс", "ФИО ученика", "Дата", "Предмет",
+                    "Учитель", "Тема урока", "Причина пропуска"
+                ])
                 for item in self.missing_data:
                     writer.writerow([
                         self.selected_class["name"] if self.selected_class else "",
@@ -591,52 +771,59 @@ class MissingTab(QWidget):
                         item["subject"],
                         item["teacher"],
                         item["topic"],
-                        item["reason"]
+                        item["reason"],
                     ])
-
             self.log_signal.emit(f"✅ CSV экспортирован: {file_path}")
-            QMessageBox.information(self, "Готово", f"Файл сохранён:\n{file_path}")
-
+            QMessageBox.information(
+                self, "Готово", f"Файл сохранён:\n{file_path}"
+            )
         except Exception as e:
             self.log_signal.emit(f"❌ Ошибка экспорта: {str(e)}")
-            QMessageBox.critical(self, "Ошибка", f"Не удалось сохранить файл:\n{str(e)}")
+            QMessageBox.critical(
+                self, "Ошибка", f"Не удалось сохранить файл:\n{str(e)}"
+            )
 
     def export_to_excel(self):
         if not self.missing_data:
             QMessageBox.warning(self, "Ошибка", "Нет данных для экспорта!")
             return
-
         try:
             from openpyxl import Workbook
             from openpyxl.styles import Alignment, Font, PatternFill
         except ImportError:
-            QMessageBox.warning(self, "Ошибка", "Модуль openpyxl не установлен")
+            QMessageBox.warning(
+                self, "Ошибка", "Модуль openpyxl не установлен"
+            )
             return
 
-        class_name = self.selected_class["name"] if self.selected_class else "unknown"
+        class_name = (
+            self.selected_class["name"] if self.selected_class else "unknown"
+        )
         student_name = self.selected_student_name.replace(" ", "_")
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"Пропуски_{class_name}_{student_name}_{timestamp}.xlsx"
-
         file_path, _ = QFileDialog.getSaveFileName(
             self, "Сохранить Excel", filename, "Excel files (*.xlsx)"
         )
-
         if not file_path:
             return
-
         try:
             wb = Workbook()
             ws = wb.active
             ws.title = "Пропуски занятий"
-
-            headers = ["Класс", "ФИО ученика", "Дата", "Предмет", "Учитель", "Тема урока", "Причина пропуска"]
+            headers = [
+                "Класс", "ФИО ученика", "Дата", "Предмет",
+                "Учитель", "Тема урока", "Причина пропуска"
+            ]
             ws.append(headers)
 
             header_font = Font(bold=True, color="FFFFFF", size=11)
-            header_fill = PatternFill(start_color="2C3E50", end_color="2C3E50", fill_type="solid")
-            header_alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
-
+            header_fill = PatternFill(
+                start_color="EA580C", end_color="EA580C", fill_type="solid"
+            )
+            header_alignment = Alignment(
+                horizontal='center', vertical='center', wrap_text=True
+            )
             for col in range(1, len(headers) + 1):
                 cell = ws.cell(row=1, column=col)
                 cell.font = header_font
@@ -651,29 +838,32 @@ class MissingTab(QWidget):
                     item["subject"],
                     item["teacher"],
                     item["topic"],
-                    item["reason"]
+                    item["reason"],
                 ])
 
-            col_widths = {'A': 12, 'B': 35, 'C': 12, 'D': 25, 'E': 25, 'F': 40, 'G': 20}
+            col_widths = {
+                'A': 12, 'B': 35, 'C': 12, 'D': 25,
+                'E': 25, 'F': 40, 'G': 20,
+            }
             for col_letter, width in col_widths.items():
                 ws.column_dimensions[col_letter].width = width
-
             ws.auto_filter.ref = ws.dimensions
+            ws.freeze_panes = 'A2'
 
             wb.save(file_path)
             self.log_signal.emit(f"✅ Excel экспортирован: {file_path}")
-
             reply = QMessageBox.question(
                 self, "Готово",
                 f"Файл сохранён:\n{file_path}\n\nОткрыть файл?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             )
             if reply == QMessageBox.StandardButton.Yes:
                 os.startfile(file_path)
-
         except Exception as e:
             self.log_signal.emit(f"❌ Ошибка экспорта: {str(e)}")
-            QMessageBox.critical(self, "Ошибка", f"Не удалось сохранить файл:\n{str(e)}")
+            QMessageBox.critical(
+                self, "Ошибка", f"Не удалось сохранить файл:\n{str(e)}"
+            )
 
     def append_to_console(self, text):
         self.console.append_text(text)

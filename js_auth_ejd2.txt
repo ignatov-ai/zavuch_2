@@ -1,0 +1,263 @@
+// ============================================================
+//  zavuch2_ejd — экспорт ЭЖД-сессии для приложения zavuch 2
+//
+//  Открывать на: https://dnevnik.mos.ru/
+//  Скачивает один файл: ejd_cookies.json
+//
+//  Формат (плоский — читается EJDImportWorker'ом напрямую):
+//    {
+//      "auth_token": "eyJ...",
+//      "aupd_token": "eyJ...",
+//      "profile_id": "16022335",
+//      "school_id": "117",
+//      "JSESSIONID": "...",
+//      "session-cookie": "...",
+//      "spa_id": "...",
+//      ... остальные cookies ...
+//    }
+//
+//  Дальше:
+//    Окно авторизации zavuch 2 → левая колонка (ЭЖД) →
+//    «📋 Импорт ЭЖД» → «📁 Выбрать файл» → ejd_cookies.json →
+//    «💾 Проверить и сохранить».
+// ============================================================
+(async function () {
+    "use strict";
+
+    const log  = (...a) => console.log("[zavuch2-ejd]", ...a);
+    const warn = (...a) => console.warn("[zavuch2-ejd]", ...a);
+
+    console.log(
+        "%c[zavuch2-ejd] Старт экспорта ЭЖД-сессии",
+        "color: #2563eb; font-weight: bold; font-size: 13px;"
+    );
+
+    // ------------------------------------------------------------
+    //  1. Мусорные cookies (трекеры) — не нужны
+    // ------------------------------------------------------------
+    const SKIP_NAMES = new Set([
+        "_ym_d", "_ym_isad", "_ym_uid",
+        "tmr_lvid", "tmr_lvidTS",
+        "yabm", "GPT_INIT", "sbp_sid",
+        "receive-cookie-deprecation",
+        "yandex_expboxes", "yashr", "ymex",
+        "yp", "yuidss", "skid",
+        "pi", "sessar", "Session_id", "sessionid2",
+        "yabs-sid",
+    ]);
+
+    // ------------------------------------------------------------
+    //  2. Собираем видимые cookies
+    // ------------------------------------------------------------
+    function readDocumentCookies() {
+        const out = {};
+        for (const part of document.cookie.split(";")) {
+            const [rawName, ...rest] = part.trim().split("=");
+            if (!rawName) continue;
+            const name = rawName.trim();
+            const value = rest.join("=").trim();
+            if (!name || SKIP_NAMES.has(name)) continue;
+            out[name] = value;
+        }
+        return out;
+    }
+
+    function getCookie(name) {
+        const m = document.cookie.match(
+            new RegExp("(?:^|; )" +
+                name.replace(/([.$?*|{}()[\]\\/+^])/g, "\\$1") + "=([^;]*)")
+        );
+        return m ? decodeURIComponent(m[1]) : "";
+    }
+
+    const cookies = readDocumentCookies();
+
+    // ------------------------------------------------------------
+    //  3. auth_token: cookie → storage → эвристика
+    // ------------------------------------------------------------
+    let auth_token = cookies["auth_token"] || getCookie("auth_token") || "";
+    let auth_source = auth_token ? "cookie" : "";
+
+    if (!auth_token) {
+        const KEYS = [
+            "auth_token", "authToken", "Auth-Token", "AUTH_TOKEN",
+            "token", "Token", "access_token", "accessToken",
+        ];
+        for (const k of KEYS) {
+            try {
+                const v = sessionStorage.getItem(k) || localStorage.getItem(k);
+                if (v && v.length > 30) {
+                    auth_token = v;
+                    auth_source = `storage["${k}"]`;
+                    break;
+                }
+            } catch (e) { /* ignore */ }
+        }
+    }
+
+    if (!auth_token) {
+        // Эвристика: ищем JWT-подобную строку в storage
+        for (const storage of [sessionStorage, localStorage]) {
+            try {
+                for (let i = 0; i < storage.length; i++) {
+                    const k = storage.key(i);
+                    const v = storage.getItem(k) || "";
+                    if (v.length > 100 && v.split(".").length === 3) {
+                        auth_token = v;
+                        auth_source = `storage-heuristic["${k}"]`;
+                        break;
+                    }
+                }
+            } catch (e) { /* ignore */ }
+            if (auth_token) break;
+        }
+    }
+
+    // ------------------------------------------------------------
+    //  4. aupd_token
+    // ------------------------------------------------------------
+    let aupd_token = cookies["aupd_token"] || getCookie("aupd_token") || "";
+    if (!aupd_token) {
+        try {
+            aupd_token =
+                sessionStorage.getItem("aupd_token") ||
+                localStorage.getItem("aupd_token") ||
+                "";
+        } catch (e) { /* ignore */ }
+    }
+
+    // ------------------------------------------------------------
+    //  5. profile_id
+    // ------------------------------------------------------------
+    let profile_id = cookies["profile_id"] || getCookie("profile_id") || "";
+    if (!profile_id) {
+        try {
+            profile_id =
+                sessionStorage.getItem("profile_id") ||
+                localStorage.getItem("profile_id") ||
+                "";
+        } catch (e) { /* ignore */ }
+    }
+
+    // ------------------------------------------------------------
+    //  6. school_id
+    // ------------------------------------------------------------
+    let school_id = "";
+    try {
+        school_id =
+            sessionStorage.getItem("school_id") ||
+            localStorage.getItem("school_id") ||
+            "";
+    } catch (e) { /* ignore */ }
+
+    // ------------------------------------------------------------
+    //  7. Мета-теги (иногда там лежит токен)
+    // ------------------------------------------------------------
+    if (!auth_token) {
+        for (const sel of [
+            "meta[name='auth-token']",
+            "meta[name='auth_token']",
+            "meta[name='csrf-token']",
+        ]) {
+            try {
+                const el = document.querySelector(sel);
+                const content = el && el.getAttribute("content");
+                if (content && content.length > 30) {
+                    auth_token = content;
+                    auth_source = `meta ${sel}`;
+                    break;
+                }
+            } catch (e) { /* ignore */ }
+        }
+    }
+
+    // ------------------------------------------------------------
+    //  8. Диагностика в консоль
+    // ------------------------------------------------------------
+    console.table({
+        url: location.href,
+        auth_token_found: !!auth_token,
+        auth_token_length: auth_token ? auth_token.length : 0,
+        auth_token_source: auth_source || "❌ не найден",
+        aupd_token_found: !!aupd_token,
+        profile_id: profile_id || "❌",
+        school_id: school_id || "—",
+        cookies_visible: Object.keys(cookies).length,
+    });
+
+    // ------------------------------------------------------------
+    //  9. Собираем итоговый плоский JSON
+    // ------------------------------------------------------------
+    const payload = {
+        auth_token: auth_token,
+        aupd_token: aupd_token || auth_token,
+        profile_id: profile_id,
+        school_id: school_id,
+        _auth_token_source: auth_source || "not_found",
+        _saved_at: new Date().toISOString(),
+    };
+
+    // Кладём все видимые cookies на верхний уровень
+    for (const [name, value] of Object.entries(cookies)) {
+        if (!(name in payload)) {
+            payload[name] = value;
+        }
+    }
+
+    // Дублируем auth_token/aupd_token/profile_id в cookies, если их там не было
+    if (auth_token && !payload["auth_token"]) payload["auth_token"] = auth_token;
+    if (aupd_token && !payload["aupd_token"]) payload["aupd_token"] = aupd_token;
+    if (profile_id && !payload["profile_id"]) payload["profile_id"] = profile_id;
+
+    // ------------------------------------------------------------
+    //  10. Скачиваем файл
+    // ------------------------------------------------------------
+    function download(filename, text) {
+        const blob = new Blob([text], {
+            type: "application/json;charset=utf-8"
+        });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(() => URL.revokeObjectURL(url), 3000);
+    }
+
+    download("ejd_cookies.json", JSON.stringify(payload, null, 2));
+    log("✅ Скачано: ejd_cookies.json");
+
+    // ------------------------------------------------------------
+    //  11. Подсказки
+    // ------------------------------------------------------------
+    if (!auth_token) {
+        console.log(
+            "%c⚠️ auth_token НЕ НАЙДЕН — он, скорее всего, HttpOnly:",
+            "color: #dc2626; font-weight: bold; font-size: 13px;"
+        );
+        console.log(
+            "%c1. F12 → Application → Cookies → https://dnevnik.mos.ru\n" +
+            "2. Найдите строку 'auth_token' → двойной клик по значению → Ctrl+C\n" +
+            "3. Откройте скачанный ejd_cookies.json в блокноте\n" +
+            "4. Вставьте значение в поле \"auth_token\" (сейчас там пусто)\n" +
+            "5. Сохраните файл и импортируйте его в zavuch 2",
+            "color: #b91c1c; font-family: monospace;"
+        );
+    } else {
+        log(`✅ auth_token найден (источник: ${auth_source})`);
+    }
+
+    if (!aupd_token) {
+        warn(
+            "ℹ️ aupd_token не найден — не критично. " +
+            "Для ЭЖД достаточно auth_token."
+        );
+    }
+
+    log("");
+    log("📥 Импорт в приложении:");
+    log("   Окно авторизации → левая колонка (ЭЖД) →");
+    log("   «📋 Импорт ЭЖД» → «📁 Выбрать файл» → ejd_cookies.json.");
+})();
