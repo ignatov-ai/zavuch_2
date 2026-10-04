@@ -21,19 +21,13 @@ from PySide6.QtGui import QFont, QColor, QTextCursor
 
 
 # ==== ПАПКА ====
-DATA_DIR = Path.home() / ".zavuch2"
-DATA_DIR.mkdir(exist_ok=True)
+from paths import (
+    SESSIONS_DIR,
+    EJD_FILES,
+    PDOU_FILES,
+)
 
-# ==== ФАЙЛЫ ====
-EJD_FILES = [
-    "session.pkl",
-    "auth_data.json",
-    "credentials.json",
-]
-PDOU_FILES = [
-    "pdou_token.json",
-    "pdou_cookies.json",
-]
+DATA_DIR = SESSIONS_DIR
 
 
 class SessionExportDialog(QDialog):

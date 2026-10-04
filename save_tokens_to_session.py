@@ -19,10 +19,7 @@ from pathlib import Path
 import requests
 
 
-DATA_DIR = Path.home() / ".zavuch2"
-DATA_DIR.mkdir(exist_ok=True)
-SESSION_FILE = DATA_DIR / "session.pkl"
-AUTH_DATA_FILE = DATA_DIR / "auth_data.json"
+from paths import SESSION_FILE, AUTH_DATA_FILE
 
 
 def log(msg):

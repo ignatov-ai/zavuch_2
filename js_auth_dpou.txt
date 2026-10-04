@@ -1,0 +1,213 @@
+// ============================================================
+//  zavuch 2 — экспорт ПДОУ-сессии (один файл)
+//
+//  Скачивает ОДИН файл: pdou_session.json
+//  Формат: токены + cookies + место под HttpOnly-cookies.
+//
+//  Что делать после скачивания:
+//    1. Открыть файл в блокноте.
+//    2. Вставить в "Ltpatoken2" значение из DevTools
+//       (Application → Cookies → esz.mos.ru).
+//    3. То же для "session-cookie", если она есть.
+//    4. Сохранить и загрузить в приложении
+//       кнопкой «📋 Импорт ПДОУ-сессии (JSON / файл)».
+// ============================================================
+(async function () {
+    "use strict";
+
+    const log = (...a) => console.log("[zavuch2]", ...a);
+    const warn = (...a) => console.warn("[zavuch2]", ...a);
+
+    // ============================================================
+    //  1. Собираем ВИДИМЫЕ cookies
+    // ============================================================
+    const SKIP_NAMES = new Set([
+        "_ym_d", "_ym_isad", "_ym_uid",
+        "tmr_lvid", "tmr_lvidTS",
+        "yabm", "GPT_INIT", "sbp_sid",
+        "receive-cookie-deprecation",
+        "yandex_expboxes", "yashr", "ymex",
+        "yp", "yuidss", "skid",
+        "pi", "sessar", "Session_id", "sessionid2",
+        "yabs-sid", "uxs_uid", "USER_AGREEMENT",
+    ]);
+
+    const cookies = {};
+    for (const part of document.cookie.split(";")) {
+        const [rawName, ...rest] = part.trim().split("=");
+        if (!rawName) continue;
+        const name = rawName.trim();
+        const value = rest.join("=").trim();
+        if (!name || SKIP_NAMES.has(name)) continue;
+        cookies[name] = value;
+    }
+
+    // ============================================================
+    //  2. aupd_token
+    // ============================================================
+    function getCookie(name) {
+        const m = document.cookie.match(
+            new RegExp("(?:^|; )" +
+                name.replace(/([.$?*|{}()[\]\\/+^])/g, "\\$1") + "=([^;]*)")
+        );
+        return m ? decodeURIComponent(m[1]) : "";
+    }
+
+    let aupd_token = cookies["aupd_token"] || getCookie("aupd_token") || "";
+    if (!aupd_token) {
+        aupd_token =
+            sessionStorage.getItem("aupd_token") ||
+            localStorage.getItem("aupd_token") ||
+            "";
+    }
+
+    // ============================================================
+    //  3. esztoken
+    // ============================================================
+    let esztoken = "";
+    for (const k of ["eszToken", "esztoken", "ESZ_TOKEN",
+                     "esz_token", "esz-token"]) {
+        esztoken = localStorage.getItem(k) || sessionStorage.getItem(k) || "";
+        if (esztoken) { log(`esztoken: ключ "${k}"`); break; }
+    }
+    if (!esztoken) {
+        for (let i = 0; i < localStorage.length; i++) {
+            const k = localStorage.key(i);
+            const v = localStorage.getItem(k) || "";
+            if (v.length > 100 && v.split(".").length === 3) {
+                log(`esztoken: найден в localStorage["${k}"]`);
+                esztoken = v;
+                break;
+            }
+        }
+    }
+
+    // ============================================================
+    //  4. user_name и роли
+    // ============================================================
+    let userName = "";
+    let userRoles = [];
+
+    try {
+        const r = await fetch(
+            "https://esz.mos.ru/Services/AuthorizationService/User/CurrentUser",
+            {
+                method: "GET",
+                credentials: "include",
+                headers: {
+                    "Accept": "application/json",
+                    "Authorization": `Bearer ${aupd_token}`,
+                    "esztoken": esztoken,
+                    "x-mes-subsystem": "headerweb",
+                    "x-mes-hostId": "28",
+                },
+            }
+        );
+        if (r.ok) {
+            const user = await r.json();
+            userName = user.userName || user.login || "";
+            const full = user.fullName || {};
+            if (full) {
+                userName =
+                    [full.lastName, full.firstName, full.middleName]
+                        .filter(Boolean).join(" ") || userName;
+            }
+            for (const role of (user.roles || [])) {
+                userRoles.push(
+                    typeof role === "object"
+                        ? (role.name || `id ${role.id}`)
+                        : String(role)
+                );
+            }
+        } else {
+            warn(`/User/CurrentUser: HTTP ${r.status}`);
+        }
+    } catch (e) {
+        warn("Не удалось получить /User/CurrentUser:", e);
+    }
+
+    // ============================================================
+    //  5. Итоги в консоль
+    // ============================================================
+    console.table({
+        aupd_token: aupd_token ? `✅ ${aupd_token.length} симв.` : "❌ нет",
+        esztoken: esztoken ? `✅ ${esztoken.length} симв.` : "❌ нет",
+        cookies_visible: Object.keys(cookies).length,
+        user_name: userName || "(не удалось)",
+        user_roles: userRoles.join(", ") || "(нет)",
+        "Ltpatoken2": cookies["Ltpatoken2"] ? "✅ есть" : "❌ вставьте вручную",
+        "session-cookie": cookies["session-cookie"] ? "✅ есть" : "❌ вставьте вручную",
+    });
+
+    if (!aupd_token || !esztoken) {
+        warn("❌ Не хватает ключевых токенов. Проверьте логин на esz.mos.ru.");
+    }
+
+    // ============================================================
+    //  6. Единый файл
+    // ============================================================
+    function nowStr() {
+        const d = new Date();
+        const p = (n) => String(n).padStart(2, "0");
+        return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} `
+             + `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+    }
+
+    // Плейсхолдеры — их надо заполнить вручную
+    const ltpa = cookies["Ltpatoken2"] || "";
+    const sessionCookie = cookies["session-cookie"] || "";
+
+    const payload = {
+        aupd_token: aupd_token,
+        esztoken: esztoken,
+        user_name: userName,
+        user_roles: userRoles,
+        saved_at: nowStr(),
+        source: "browser_console",
+        cookies: {
+            ...cookies,
+            // Убеждаемся, что они точно есть в объекте (даже пустые)
+            "Ltpatoken2": ltpa,
+            "session-cookie": sessionCookie,
+        },
+    };
+
+    // ============================================================
+    //  7. Скачиваем
+    // ============================================================
+    const text = JSON.stringify(payload, null, 2);
+    const blob = new Blob([text], { type: "application/json;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "pdou_session.json";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 3000);
+
+    // ============================================================
+    //  8. Инструкция
+    // ============================================================
+    log("✅ Скачано: pdou_session.json");
+    log("");
+    if (ltpa && sessionCookie) {
+        log("🎉 Ltpatoken2 и session-cookie уже есть — файл готов к импорту.");
+    } else {
+        log("📌 ЧТО ДЕЛАТЬ ДАЛЬШЕ:");
+        if (!ltpa) {
+            log("   1. F12 → Application → Cookies → esz.mos.ru");
+            log("   2. Найдите Ltpatoken2 → двойной клик → Ctrl+C");
+            log("   3. Откройте pdou_session.json в блокноте");
+            log('   4. Вставьте значение в "Ltpatoken2" (сейчас "")');
+        }
+        if (!sessionCookie) {
+            log("   5. То же для session-cookie (если она есть)");
+        }
+        log("   6. Сохраните файл");
+    }
+    log("");
+    log("📥 Импорт в приложении:");
+    log("   Окно авторизации → правая колонка (ПДОУ) →");
+    log("   «📋 Импорт ПДОУ-сессии (JSON / файл)» → выберите pdou_session.json.");
+})();

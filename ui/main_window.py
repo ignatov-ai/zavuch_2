@@ -1,5 +1,11 @@
 # -*- coding: utf-8 -*-
+"""
+Главное окно приложения. Поддерживает два режима:
+  • ЭЖД-режим — все вкладки.
+  • ПДОУ-режим — только ПДОУ-вкладки + «Настройки».
+"""
 import sys
+
 from PySide6.QtWidgets import *
 from PySide6.QtCore import *
 from PySide6.QtGui import *
@@ -16,10 +22,11 @@ from ui.settings_tab import SettingsTab
 from ui.ktp_check_tab import KTPCheckTab
 from ui.ktp_check_tab_main import KTPMainCheckTab
 from ui.pdou_tab import PDOUTab
+from ui.pdou_requests_tab import PDOURequestsTab
 
 
 class MainWindow(QMainWindow):
-    """Главное окно приложения"""
+    """Главное окно приложения. Поддерживает ЭЖД- и ПДОУ-режимы."""
 
     auth_updated = Signal(object)
 
@@ -27,17 +34,18 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.auth = None
         self.auth_obj = None
+        self.mode = None
         self.tab_widgets = []
         self._menu_visible = True
         self.initUI()
 
-        # Перенаправление stdout
         self.stream = EmittingStream()
         self.stream.text_written.connect(self.append_to_console)
         sys.stdout = self.stream
 
     def initUI(self):
-        self.setWindowTitle("Скачивание и проверка журналов из ЭЖД")
+        self.setWindowTitle("zavuch 2")
+        self._apply_mode_title()
 
         screen = QApplication.primaryScreen().geometry()
         width = int(screen.width() * 0.85)
@@ -51,25 +59,21 @@ class MainWindow(QMainWindow):
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
 
-        # ============================================================
-        #  ЛЕВОЕ МЕНЮ (в контейнере, чтобы скрывать/показывать)
-        # ============================================================
+        # === ЛЕВОЕ МЕНЮ ===
         self.menu_container = QWidget()
         menu_container_layout = QVBoxLayout(self.menu_container)
         menu_container_layout.setContentsMargins(0, 0, 0, 0)
         menu_container_layout.setSpacing(0)
 
-        # Логотип / заголовок
-        title_label = QLabel("📚  zavuch 2")
-        title_label.setStyleSheet("""
+        self.title_label = QLabel("📚  zavuch 2")
+        self.title_label.setStyleSheet("""
             font-size: 14pt;
             font-weight: bold;
             color: #2563eb;
             padding: 15px 10px 10px 15px;
         """)
-        menu_container_layout.addWidget(title_label)
+        menu_container_layout.addWidget(self.title_label)
 
-        # Само меню
         self.menu_list = QListWidget()
         self.menu_list.setStyleSheet("""
             QListWidget {
@@ -105,9 +109,7 @@ class MainWindow(QMainWindow):
             }
         """)
 
-        # ============================================================
-        #  КНОПКА СВОРАЧИВАНИЯ (всегда видна, вертикальная полоса)
-        # ============================================================
+        # === КНОПКА СВОРАЧИВАНИЯ ===
         self.toggle_menu_btn = QPushButton("◀")
         self.toggle_menu_btn.setFixedWidth(22)
         self.toggle_menu_btn.setSizePolicy(
@@ -136,9 +138,7 @@ class MainWindow(QMainWindow):
         """)
         self.toggle_menu_btn.clicked.connect(self.toggle_menu)
 
-        # ============================================================
-        #  ПРАВАЯ ОБЛАСТЬ (QStackedWidget)
-        # ============================================================
+        # === ПРАВАЯ ОБЛАСТЬ ===
         self.stack = QStackedWidget()
         self.stack.setStyleSheet("""
             QStackedWidget {
@@ -153,16 +153,11 @@ class MainWindow(QMainWindow):
         right_layout.setSpacing(0)
         right_layout.addWidget(self.stack)
 
-        # ============================================================
-        #  СБОРКА MAIN_LAYOUT
-        # ============================================================
         main_layout.addWidget(self.menu_container)
         main_layout.addWidget(self.toggle_menu_btn)
         main_layout.addWidget(right_container, 1)
 
-        # ============================================================
-        #  СОЗДАЁМ ВКЛАДКИ
-        # ============================================================
+        # === ВКЛАДКИ ===
         self.settings_tab = SettingsTab(self)
         if hasattr(self.settings_tab, 'auth_successful'):
             self.settings_tab.auth_successful.connect(self.on_global_auth)
@@ -177,36 +172,23 @@ class MainWindow(QMainWindow):
         self.ktp_main_check_tab = KTPMainCheckTab(self)
         self.ktp_check_tab = KTPCheckTab(self)
         self.pdou_tab = PDOUTab(self)
+        self.pdou_requests_tab = PDOURequestsTab(self)
 
-        # ============================================================
-        #  ПОРЯДОК В МЕНЮ
-        # ============================================================
-        tabs = [
-            ("📥  Скачивание журналов", self.download_tab),
-            ("🔍  Проверка журналов", self.check_tab),
-            ("🎯  Проверка итогов (5-9)", self.check_results_tab_5_9),
-            ("🎯  Проверка итогов Online", self.check_results_tab_5_9_online),
-            ("🎯  Проверка итогов (10-11)", self.check_results_tab_10_11),
-            ("🔍  Проверка КТП (ОЧ+ФЧ)", self.ktp_main_check_tab),
-            ("🔍  Проверка КТП (ВД)", self.ktp_check_tab),
-            ("🎨  Кружки ПДОУ", self.pdou_tab),
-            ("📊  Пропуски занятий", self.missing_tab),
-            ("📨  Уведомления родителям", self.notify_tab),
-            ("⚙️  Настройки", self.settings_tab),
+        self._all_tabs = [
+            ("📥  Скачивание журналов", self.download_tab, "ejd"),
+            ("🔍  Проверка журналов", self.check_tab, "ejd"),
+            ("🎯  Проверка итогов (5-9)", self.check_results_tab_5_9, "ejd"),
+            ("🎯  Проверка итогов Online", self.check_results_tab_5_9_online, "ejd"),
+            ("🎯  Проверка итогов (10-11)", self.check_results_tab_10_11, "ejd"),
+            ("🔍  Проверка КТП (ОЧ+ФЧ)", self.ktp_main_check_tab, "ejd"),
+            ("🔍  Проверка КТП (ВД)", self.ktp_check_tab, "ejd"),
+            ("🎨  Кружки ПДОУ", self.pdou_tab, "pdou"),
+            ("📋  Заявления ПДОУ", self.pdou_requests_tab, "pdou"),
+            ("📊  Пропуски занятий", self.missing_tab, "ejd"),
+            ("📨  Уведомления родителям", self.notify_tab, "ejd"),
+            ("⚙️  Настройки", self.settings_tab, "ejd"),
         ]
 
-        self.tab_widgets = []
-        for title, widget in tabs:
-            self.menu_list.addItem(title)
-            self.stack.addWidget(widget)
-            has_console = hasattr(widget, 'console')
-            self.tab_widgets.append((widget, has_console))
-
-        self.menu_list.setCurrentRow(0)
-
-        # ============================================================
-        #  ПОДКЛЮЧАЕМ СИГНАЛ АВТОРИЗАЦИИ
-        # ============================================================
         tabs_with_auth = [
             self.download_tab,
             self.check_tab,
@@ -218,17 +200,59 @@ class MainWindow(QMainWindow):
             self.ktp_main_check_tab,
             self.ktp_check_tab,
             self.pdou_tab,
+            self.pdou_requests_tab,
         ]
-
         for tab in tabs_with_auth:
             if hasattr(tab, 'on_auth_updated'):
                 self.auth_updated.connect(tab.on_auth_updated)
 
-    # ================================================================
-    #  СВОРАЧИВАНИЕ / РАЗВОРАЧИВАНИЕ МЕНЮ
-    # ================================================================
+        self._build_tabs_for_mode("ejd")
+
+    def _build_tabs_for_mode(self, mode: str):
+        self.menu_list.blockSignals(True)
+        self.menu_list.clear()
+        while self.stack.count() > 0:
+            w = self.stack.widget(0)
+            self.stack.removeWidget(w)
+        self.menu_list.blockSignals(False)
+
+        self.tab_widgets = []
+
+        if mode == "pdou":
+            selected = [e for e in self._all_tabs if e[2] == "pdou"]
+            settings_entry = next(
+                (e for e in self._all_tabs if e[1] is self.settings_tab),
+                None,
+            )
+            if settings_entry:
+                selected.append(settings_entry)
+        else:
+            selected = list(self._all_tabs)
+
+        for title, widget, _tag in selected:
+            self.menu_list.addItem(title)
+            self.stack.addWidget(widget)
+            has_console = hasattr(widget, 'console')
+            self.tab_widgets.append((widget, has_console))
+
+        if self.menu_list.count() > 0:
+            self.menu_list.setCurrentRow(0)
+
+    def _apply_mode_title(self):
+        if self.mode == "pdou":
+            self.setWindowTitle("zavuch 2 — ПДОУ (кружки и заявления)")
+            if hasattr(self, "title_label"):
+                self.title_label.setText("🎨  zavuch 2 · ПДОУ")
+        elif self.mode == "ejd":
+            self.setWindowTitle("zavuch 2 — ЭЖД МЭШ")
+            if hasattr(self, "title_label"):
+                self.title_label.setText("📚  zavuch 2 · ЭЖД")
+        else:
+            self.setWindowTitle("zavuch 2")
+            if hasattr(self, "title_label"):
+                self.title_label.setText("📚  zavuch 2")
+
     def toggle_menu(self):
-        """Свернуть/развернуть боковое меню."""
         if self.menu_container.isVisible():
             self.menu_container.setVisible(False)
             self.toggle_menu_btn.setText("▶")
@@ -240,34 +264,67 @@ class MainWindow(QMainWindow):
             self.toggle_menu_btn.setToolTip("Свернуть меню")
             self._menu_visible = True
 
-    # ================================================================
-    #  ПЕРЕКЛЮЧЕНИЕ ВКЛАДОК
-    # ================================================================
     def on_menu_changed(self, row):
         if 0 <= row < self.stack.count():
             self.stack.setCurrentIndex(row)
 
-    # ================================================================
-    #  АВТОРИЗАЦИЯ
-    # ================================================================
     def on_global_auth(self, auth_data):
-        """Приём авторизации из AuthWindow."""
         if not auth_data:
             return
 
+        if isinstance(auth_data, dict) and auth_data.get("saved"):
+            # ПДОУ-режим
+            self.mode = "pdou"
+            self.auth = None
+            self.auth_obj = None
+
+            user_name = auth_data.get("user_name", "") or "неизвестен"
+            roles = auth_data.get("roles", []) or []
+            roles_text = ", ".join(roles) if roles else "нет ролей"
+
+            self._build_tabs_for_mode("pdou")
+            self._apply_mode_title()
+            self.append_to_console(
+                f"✅ Режим ПДОУ. Пользователь: {user_name}.\n"
+                f"   Роли ЕСЗ: {roles_text}\n"
+                f"   Доступны вкладки «🎨 Кружки ПДОУ» и «📋 Заявления ПДОУ» "
+                f"(+ «⚙️ Настройки»)."
+            )
+            return
+
+        # ЭЖД-режим
+        self.mode = "ejd"
         self.auth = auth_data
         self.auth_obj = auth_data
 
         if hasattr(self.settings_tab, 'set_auth'):
             self.settings_tab.set_auth(auth_data)
 
+        self._build_tabs_for_mode("ejd")
+        self._apply_mode_title()
+
         self.auth_updated.emit(auth_data)
-        self.append_to_console("✅ Авторизация установлена. Все вкладки готовы.")
+        self.append_to_console(
+            "✅ ЭЖД-режим. Авторизация установлена. Все вкладки готовы."
+        )
 
     def append_to_console(self, text):
         current_widget = self.stack.currentWidget()
-        if hasattr(current_widget, 'console'):
-            current_widget.console.append_text(text)
+        if not hasattr(current_widget, "console"):
+            return
+
+        console = current_widget.console
+        if hasattr(console, "append_text"):
+            console.append_text(text)
+            return
+        if hasattr(console, "appendPlainText"):
+            console.appendPlainText(str(text))
+            sb = console.verticalScrollBar()
+            sb.setValue(sb.maximum())
+            return
+        if hasattr(console, "append"):
+            console.append(str(text))
+            return
 
     def closeEvent(self, event):
         sys.stdout = sys.__stdout__
