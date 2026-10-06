@@ -3,6 +3,7 @@
 Вкладка «⚙️ Настройки».
 • Статус авторизации
 • Учебный год
+• Учебный план и пороги проблемности
 • Экспорт / импорт сессий (ЭЖД и ПДОУ)
 """
 import json
@@ -11,9 +12,9 @@ import shutil
 from datetime import datetime
 from pathlib import Path
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
-    QGroupBox, QFileDialog, QMessageBox, QComboBox, QDialog,
-    QDialogButtonBox, QCheckBox, QTextEdit,
+    QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QLineEdit,
+    QPushButton, QGroupBox, QFileDialog, QMessageBox, QComboBox, QDialog,
+    QDialogButtonBox, QCheckBox, QTextEdit, QSpinBox, QDoubleSpinBox,
 )
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont, QColor, QTextCursor
@@ -224,6 +225,20 @@ TAB_STYLE = """
         font-size: 11pt;
     }
     QComboBox:focus { border: 1px solid #475569; }
+    QLineEdit {
+        min-height: 30px;
+        padding: 2px 8px;
+        border: 1px solid #cbd5e1;
+        border-radius: 6px;
+        background: #ffffff;
+    }
+    QSpinBox, QDoubleSpinBox {
+        min-height: 30px;
+        padding: 2px 8px;
+        border: 1px solid #cbd5e1;
+        border-radius: 6px;
+        background: #ffffff;
+    }
     QLabel { color: #334155; }
 """
 
@@ -232,15 +247,17 @@ TAB_STYLE = """
 # Вкладка
 # ============================================================
 class SettingsTab(QWidget):
-    """Вкладка настроек: статус авторизации + учебный год + экспорт сессий"""
+    """Вкладка настроек: статус авторизации + учебный год + УП + экспорт сессий"""
     auth_successful = Signal(object)
     academic_year_changed = Signal(int)
+    settings_changed = Signal(dict)
 
     def __init__(self, parent):
         super().__init__()
         self.main_window = parent
         self.auth = None
         self.current_academic_year_id = 14
+        self._loading_settings = False
         self.initUI()
         self.load_saved_settings()
         self.refresh_session_status()
@@ -261,7 +278,8 @@ class SettingsTab(QWidget):
         main_layout.addWidget(title)
 
         subtitle = QLabel(
-            "Статус авторизации, учебный год, экспорт и импорт сессий."
+            "Статус авторизации, учебный год, учебный план, пороги "
+            "проблемности, экспорт и импорт сессий."
         )
         subtitle.setWordWrap(True)
         subtitle.setStyleSheet("color: #64748b; margin-bottom: 4px;")
@@ -522,6 +540,85 @@ class SettingsTab(QWidget):
         year_layout.addWidget(self.year_id_label)
         main_layout.addWidget(year_group)
 
+        # === УЧЕБНЫЙ ПЛАН И ПОРОГИ ПРОБЛЕМНОСТИ ===
+        curriculum_group = QGroupBox("📚  Учебный план и пороги проблемности")
+        curriculum_group.setStyleSheet("""
+            QGroupBox {
+                font-size: 11pt; font-weight: 700;
+                color: #0369a1;
+                border: 1px solid #7dd3fc;
+                border-radius: 10px;
+                margin-top: 12px;
+                padding: 18px 14px 14px 14px;
+                background: #ffffff;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 12px; padding: 0 6px;
+            }
+        """)
+        curriculum_layout = QGridLayout(curriculum_group)
+        curriculum_layout.setVerticalSpacing(10)
+        curriculum_layout.setHorizontalSpacing(12)
+
+        curriculum_layout.addWidget(QLabel("Файл учебного плана:"), 0, 0)
+        curriculum_widget = QWidget()
+        curriculum_row = QHBoxLayout(curriculum_widget)
+        curriculum_row.setContentsMargins(0, 0, 0, 0)
+        curriculum_row.setSpacing(6)
+        self.curriculum_edit = QLineEdit()
+        self.curriculum_edit.setPlaceholderText(
+            "Сводная_таблица_УП_5-11_классы.xlsx"
+        )
+        self.curriculum_edit.editingFinished.connect(self.save_settings)
+        curriculum_row.addWidget(self.curriculum_edit, 1)
+        self.curriculum_browse_btn = QPushButton("Обзор…")
+        self.curriculum_browse_btn.setFixedWidth(90)
+        self.curriculum_browse_btn.clicked.connect(self.browse_curriculum)
+        curriculum_row.addWidget(self.curriculum_browse_btn)
+        curriculum_layout.addWidget(curriculum_widget, 0, 1)
+
+        curriculum_layout.addWidget(
+            QLabel("Порог накопляемости (%):"), 1, 0
+        )
+        self.threshold_accumulation_spin = QSpinBox()
+        self.threshold_accumulation_spin.setRange(0, 100)
+        self.threshold_accumulation_spin.setValue(70)
+        self.threshold_accumulation_spin.setSuffix(" %")
+        self.threshold_accumulation_spin.setMaximumWidth(120)
+        self.threshold_accumulation_spin.valueChanged.connect(
+            self.save_settings
+        )
+        curriculum_layout.addWidget(self.threshold_accumulation_spin, 1, 1)
+
+        curriculum_layout.addWidget(
+            QLabel("Порог среднего балла:"), 2, 0
+        )
+        self.threshold_avg_spin = QDoubleSpinBox()
+        self.threshold_avg_spin.setRange(2.0, 5.0)
+        self.threshold_avg_spin.setValue(3.5)
+        self.threshold_avg_spin.setSingleStep(0.1)
+        self.threshold_avg_spin.setMaximumWidth(120)
+        self.threshold_avg_spin.valueChanged.connect(self.save_settings)
+        curriculum_layout.addWidget(self.threshold_avg_spin, 2, 1)
+
+        hint2 = QLabel(
+            "ℹ️  Пороги используются во вкладке "
+            "«🔍 Проверка журналов Online» для фильтра "
+            "«Только проблемные». Файл УП нужен для расчёта нормы "
+            "накопляемости отметок (уроков в неделю → минимум отметок)."
+        )
+        hint2.setStyleSheet("""
+            color: #475569; background-color: #f8fafc;
+            border: 1px solid #e2e8f0;
+            padding: 8px 10px; border-radius: 6px;
+            font-size: 9pt;
+        """)
+        hint2.setWordWrap(True)
+        curriculum_layout.addWidget(hint2, 3, 0, 1, 2)
+
+        main_layout.addWidget(curriculum_group)
+
         main_layout.addStretch()
         self.update_year_display()
         self.setStyleSheet(TAB_STYLE)
@@ -760,9 +857,13 @@ class SettingsTab(QWidget):
     def update_year_display(self):
         aid = self.year_combo.currentData()
         year_text = self.year_combo.currentText()
-        self.year_id_label.setText(f"ID учебного года (aid): {aid}  |  {year_text}")
+        self.year_id_label.setText(
+            f"ID учебного года (aid): {aid}  |  {year_text}"
+        )
 
     def on_year_changed(self, index):
+        if self._loading_settings:
+            return
         aid = self.year_combo.currentData()
         if aid is None:
             return
@@ -774,14 +875,39 @@ class SettingsTab(QWidget):
             self.auth.aid = str(aid)
             self.auth.curr_aid = str(aid)
 
+    # ================================================================
+    # УЧЕБНЫЙ ПЛАН
+    # ================================================================
+    def browse_curriculum(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Выберите файл учебного плана", "",
+            "Excel files (*.xlsx);;Все файлы (*.*)"
+        )
+        if file_path:
+            self.curriculum_edit.setText(file_path)
+            self.save_settings()
+
+    # ================================================================
+    # НАСТРОЙКИ
+    # ================================================================
     def get_settings_file(self):
         return DATA_DIR / 'settings.json'
 
     def save_settings(self):
+        if self._loading_settings:
+            return
         try:
-            settings = {'academic_year_id': self.year_combo.currentData()}
+            settings = {
+                'academic_year_id': self.year_combo.currentData(),
+                'curriculum_file': self.curriculum_edit.text().strip(),
+                'threshold_accumulation':
+                    self.threshold_accumulation_spin.value(),
+                'threshold_avg_mark':
+                    self.threshold_avg_spin.value(),
+            }
             with open(self.get_settings_file(), 'w', encoding='utf-8') as f:
                 json.dump(settings, f, ensure_ascii=False, indent=2)
+            self.settings_changed.emit(settings)
         except Exception as e:
             print(f"Ошибка сохранения настроек: {e}")
 
@@ -790,6 +916,7 @@ class SettingsTab(QWidget):
         if not settings_file.exists():
             return
         try:
+            self._loading_settings = True
             with open(settings_file, 'r', encoding='utf-8') as f:
                 settings = json.load(f)
             aid = settings.get('academic_year_id')
@@ -798,5 +925,20 @@ class SettingsTab(QWidget):
                 if index >= 0:
                     self.year_combo.setCurrentIndex(index)
                     self.current_academic_year_id = aid
+
+            cur = settings.get('curriculum_file', '')
+            if cur:
+                self.curriculum_edit.setText(cur)
+
+            acc = settings.get('threshold_accumulation')
+            if acc is not None:
+                self.threshold_accumulation_spin.setValue(int(acc))
+
+            avg = settings.get('threshold_avg_mark')
+            if avg is not None:
+                self.threshold_avg_spin.setValue(float(avg))
         except Exception as e:
             print(f"Ошибка загрузки настроек: {e}")
+        finally:
+            self._loading_settings = False
+            self.update_year_display()

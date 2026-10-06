@@ -469,11 +469,20 @@ class EJDImportWorker(QThread):
 
         if self.save:
             try:
-                clean_jar = CookieJar()
+                # Собираем cookies как список словарей — безопасно для pickle
+                cookies_list = []
                 for c in cj:
-                    clean_jar.set_cookie(c)
+                    cookies_list.append({
+                        "name": c.name,
+                        "value": c.value,
+                        "domain": c.domain,
+                        "path": c.path or "/",
+                        "secure": bool(c.secure),
+                        "expires": c.expires,
+                    })
+
                 with open(SESSION_FILE, "wb") as f:
-                    pickle.dump(clean_jar, f)
+                    pickle.dump(cookies_list, f)
                 with open(AUTH_DATA_FILE, "w", encoding="utf-8") as f:
                     json.dump({
                         "auth_token": auth_token,
